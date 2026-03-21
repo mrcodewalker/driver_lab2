@@ -20,4 +20,4 @@ MODULE_INFO(depends, "usbcore,usb-common");
 MODULE_ALIAS("usb:vA69Cp5721d*dc*dsc*dp*ic*isc*ip*in*");
 MODULE_ALIAS("usb:vA69Cp8D80d*dc*dsc*dp*ic*isc*ip*in*");
 
-MODULE_INFO(srcversion, "5A9B797AE949C6915CD5CA5");
+MODULE_INFO(srcversion, "1B1F1282CD86B8C1FD1265A");

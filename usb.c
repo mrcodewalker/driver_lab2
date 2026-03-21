@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * usb.c — AIC Semi USB WiFi Multi-Mode Driver v3.2.0
+ * usb.c — AIC Semi USB WiFi Multi-Mode Driver v4.0.0
  *
- * ĐỀ TÀI: Phát triển USB Multi-Mode Network Driver
- *         và cơ chế nhận diện thiết bị tự chuyển đổi trạng thái
+ * ĐỀ TÀI: Phát triển USB Network Driver tích hợp
+ *         cơ chế giám sát lưu lượng mạng theo thời gian thực
  *
  * Thiết bị: AIC Semi (a69c:5721 → a69c:8d80)
- *   Mode 1 (0x5721): USB Mass Storage — chứa driver Windows
- *   Mode 2 (0x8d80): AIC WLAN — sau khi chuyển đổi mode
  *
- * v3.2: Log tiếng Việt chi tiết, đẹp, nhiều thông tin
+ * TÍNH NĂNG v4.0 (MỚI):
+ *   - Ring buffer 1024 entries trong kernel (lock-free)
+ *   - ioctl API: CLEAR / GETRING / SETFILT / GETSTATS
+ *   - Lưu TX+RX với timestamp, src/dst IP, port, TCP flags
+ *   - monitor.c đọc qua ioctl → ncurses dashboard realtime
  */
 
 #include <linux/module.h>
@@ -33,9 +35,13 @@
 #include <linux/jiffies.h>
 #include <linux/random.h>
 #include <linux/atomic.h>
+#include <linux/spinlock.h>
+#include <linux/uaccess.h>   /* copy_to_user */
+#include <linux/ktime.h>     /* ktime_get_real_ns */
+#include <uapi/linux/sockios.h>
 
 /* ================================================================
- * KERNEL VERSION COMPAT — timer API đổi ở kernel 6.7
+ * KERNEL VERSION COMPAT
  * ================================================================ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
   #define aic_timer_of(ptr, type, member)  from_timer(ptr, t, member)
@@ -51,8 +57,8 @@
  * MODULE INFO
  * ================================================================ */
 #define DRIVER_NAME     "aicsemi_multimode"
-#define DRIVER_VERSION  "3.2.0"
-#define DRIVER_DESC     "AIC Semi USB WiFi Multi-Mode Driver (Log TV)"
+#define DRIVER_VERSION  "4.0.0"
+#define DRIVER_DESC     "AIC Semi USB Network Driver + Packet Monitor"
 
 #define VENDOR_AIC   0xa69c
 #define PID_STORAGE  0x5721
@@ -64,11 +70,7 @@ MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 
 /* ================================================================
- * LOG HELPERS — in đẹp hơn pr_info thuần
- *
- * Dùng pr_info thay vì printk để tự động thêm KERN_INFO.
- * Các macro bên dưới thêm prefix có màu khi xem qua dmesg --color
- * (kernel 5.10+ hỗ trợ KERN_CONT để nối dòng).
+ * LOG HELPERS
  * ================================================================ */
 #define AIC_TAG   "[aicsemi] "
 #define AIC_SEP   "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -79,12 +81,89 @@ MODULE_LICENSE("GPL");
 #define AIC_ERR   "✗ "
 #define AIC_ARR   "→ "
 
-#define alog(fmt, ...)   pr_info(AIC_TAG fmt "\n", ##__VA_ARGS__)
-#define alog_sep()       pr_info(AIC_TAG AIC_SEP "\n")
-#define alog_sep2()      pr_info(AIC_TAG AIC_SEP2 "\n")
-#define alog_ok(fmt, ...) pr_info(AIC_TAG AIC_OK fmt "\n", ##__VA_ARGS__)
+#define alog(fmt, ...)      pr_info(AIC_TAG fmt "\n", ##__VA_ARGS__)
+#define alog_sep()          pr_info(AIC_TAG AIC_SEP "\n")
+#define alog_sep2()         pr_info(AIC_TAG AIC_SEP2 "\n")
+#define alog_ok(fmt, ...)   pr_info(AIC_TAG AIC_OK  fmt "\n", ##__VA_ARGS__)
 #define alog_warn(fmt, ...) pr_warn(AIC_TAG AIC_WARN fmt "\n", ##__VA_ARGS__)
-#define alog_err(fmt, ...) pr_err(AIC_TAG AIC_ERR fmt "\n", ##__VA_ARGS__)
+#define alog_err(fmt, ...)  pr_err (AIC_TAG AIC_ERR  fmt "\n", ##__VA_ARGS__)
+
+/* ================================================================
+ * RING BUFFER — Lưu packet metadata trong kernel
+ *
+ * Thiết kế lock-free cho TX path (softirq/interrupt context):
+ *   - head: vị trí ghi tiếp theo (atomic, chỉ tăng)
+ *   - Wrap-around tự động với modulo MON_RING_SIZE
+ *   - Đọc dùng spinlock (monitor.c gọi ioctl, không hot path)
+ *
+ * Mỗi entry ~56 bytes → tổng ring = 56KB (rất nhỏ, an toàn)
+ * ================================================================ */
+#define MON_RING_SIZE  1024  /* phải là lũy thừa của 2 */
+#define MON_RING_MASK  (MON_RING_SIZE - 1)
+
+/*
+ * QUAN TRỌNG — Cách kernel route ioctl đến ndo_siocdevprivate:
+ *
+ * Kernel chỉ gọi ndo_siocdevprivate khi cmd nằm trong range:
+ *   SIOCDEVPRIVATE     = 0x89F0
+ *   SIOCDEVPRIVATE+15  = 0x89FF
+ *
+ * Nếu dùng _IOR('A', n, ...) → cmd = 0x804xxxxx → kernel KHÔNG route
+ * vào ndo_siocdevprivate → errno=25 (ENOTTY).
+ *
+ * Fix: dùng SIOCDEVPRIVATE + offset làm cmd number.
+ * Driver switch trên (cmd - SIOCDEVPRIVATE) để phân biệt.
+ */
+#include <uapi/linux/sockios.h>   /* SIOCDEVPRIVATE */
+
+#define AICSEMI_CMD_CLEAR    0   /* SIOCDEVPRIVATE + 0 */
+#define AICSEMI_CMD_GETRING  1   /* SIOCDEVPRIVATE + 1 */
+#define AICSEMI_CMD_SETFILT  2   /* SIOCDEVPRIVATE + 2 */
+#define AICSEMI_CMD_GETSTATS 3   /* SIOCDEVPRIVATE + 3 */
+
+/* Một entry trong ring buffer */
+struct pkt_entry {
+    u64   ts_ns;      /* ktime_get_real_ns() — nanoseconds */
+    u32   seq;        /* số thứ tự toàn cục */
+    u32   len;        /* frame length bytes */
+    u16   eth_proto;  /* ETH_P_IP, ETH_P_ARP, ETH_P_IPV6... */
+    u8    ip_proto;   /* IPPROTO_TCP, UDP, ICMP, 0 nếu không phải IP */
+    u8    direction;  /* 'T' = TX, 'R' = RX */
+    __be32 saddr;     /* source IP (network byte order) */
+    __be32 daddr;     /* dest IP */
+    u16   sport;      /* source port (host byte order) */
+    u16   dport;      /* dest port */
+    u8    tcp_flags;  /* SYN=0x02 ACK=0x10 FIN=0x01 RST=0x04 */
+    u8    icmp_type;
+    u8    pad[2];
+};
+
+/* Struct export qua ioctl GETRING */
+struct aicsemi_ring_export {
+    u32             count;              /* số entry hợp lệ */
+    u32             head;               /* vị trí đầu hiện tại */
+    struct pkt_entry entries[MON_RING_SIZE];
+};
+
+/* Struct export qua ioctl GETSTATS */
+struct aicsemi_stats_export {
+    u64 tx_total, tx_bytes, tx_dropped;
+    u64 rx_total, rx_bytes;
+    u64 tcp, udp, icmp, arp, ipv6, other;
+    u64 uptime_sec;
+    char ifname[16];
+    char driver_ver[16];
+};
+
+/* Ring buffer trong private data */
+struct mon_ring {
+    struct pkt_entry entries[MON_RING_SIZE];
+    atomic_t         head;    /* ghi: atomic increment, không cần lock */
+    atomic_t         count;   /* số entry đã ghi (tối đa MON_RING_SIZE) */
+    spinlock_t       rd_lock; /* chỉ dùng khi đọc toàn bộ ring */
+    u32              filter;  /* 0 = tất cả, hoặc IPPROTO_TCP/UDP/ICMP */
+    ktime_t          start_time;
+};
 
 /* ================================================================
  * PACKET STATS
@@ -109,6 +188,7 @@ struct aicsemi_priv {
     bool                     carrier_on;
 
     struct pkt_stats         stats;
+    struct mon_ring          ring;       /* ★ ring buffer mới */
     struct proc_dir_entry   *proc_entry;
 
     struct timer_list        watchdog;
@@ -424,6 +504,131 @@ static const struct proc_ops monitor_proc_ops = {
 };
 
 /* ================================================================
+ * RING BUFFER — Ghi packet vào ring (gọi từ TX/RX path)
+ *
+ * Hàm này chạy trong softirq context (TX) hoặc workqueue (RX).
+ * Dùng atomic để tránh lock trong hot path.
+ * ================================================================ */
+static void ring_push(struct mon_ring *r, const struct pkt_entry *e)
+{
+    u32 idx;
+
+    /* Filter: bỏ qua nếu không match (0 = chấp nhận tất cả) */
+    if (r->filter != 0 && e->ip_proto != 0 && e->ip_proto != r->filter)
+        return;
+
+    /* Lấy vị trí ghi — atomic, không cần lock */
+    idx = (u32)atomic_inc_return(&r->head) & MON_RING_MASK;
+    r->entries[idx] = *e;
+
+    /* Cập nhật count (tối đa MON_RING_SIZE) */
+    if (atomic_read(&r->count) < MON_RING_SIZE)
+        atomic_inc(&r->count);
+}
+
+/* ================================================================
+ * IOCTL HANDLER
+ * kernel ≥ 5.15: ndo_siocdevprivate(dev, ifr, data, cmd)
+ *   - data = ifr->ifr_data đã được kernel validate là userspace ptr
+ *   - cmd  = ioctl number đầy đủ từ userspace
+ * kernel < 5.15: ndo_do_ioctl(dev, ifr, cmd)
+ * ================================================================ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+static int aicsemi_ioctl(struct net_device *dev, struct ifreq *ifr,
+                          void __user *data, int cmd)
+#else
+static int aicsemi_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+#endif
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+    void __user *data = (void __user *)ifr->ifr_data;
+#endif
+    struct aicsemi_priv        *priv = dev->ml_priv;
+    struct mon_ring            *r    = &priv->ring;
+    struct aicsemi_ring_export *exp;
+    struct aicsemi_stats_export st;
+    unsigned long               flags;
+    u32                         filt;
+    int                         ret  = 0;
+
+    alog("  [ioctl] cmd=0x%08x offset=%d iface=%s",
+         (unsigned)cmd, cmd - SIOCDEVPRIVATE, dev->name);
+
+    switch (cmd - SIOCDEVPRIVATE) {
+
+    /* ── CLEAR: Xóa toàn bộ ring và counter ── */
+    case AICSEMI_CMD_CLEAR:
+        alog("  [ioctl] CLEAR: xóa ring buffer");
+        spin_lock_irqsave(&r->rd_lock, flags);
+        atomic_set(&r->head,  -1);
+        atomic_set(&r->count,  0);
+        memset(r->entries, 0, sizeof(r->entries));
+        spin_unlock_irqrestore(&r->rd_lock, flags);
+        alog_ok("Ring buffer đã xóa qua ioctl");
+        break;
+
+    /* ── GETRING: Export toàn bộ ring sang userspace ── */
+    case AICSEMI_CMD_GETRING:
+        alog("  [ioctl] GETRING: count=%d data=%p",
+             atomic_read(&r->count), data);
+        if (!data) return -EINVAL;
+        exp = kzalloc(sizeof(*exp), GFP_KERNEL);
+        if (!exp)
+            return -ENOMEM;
+
+        spin_lock_irqsave(&r->rd_lock, flags);
+        exp->count = (u32)atomic_read(&r->count);
+        exp->head  = (u32)atomic_read(&r->head) & MON_RING_MASK;
+        memcpy(exp->entries, r->entries, sizeof(r->entries));
+        spin_unlock_irqrestore(&r->rd_lock, flags);
+
+        if (copy_to_user(data, exp, sizeof(*exp)))
+            ret = -EFAULT;
+        kfree(exp);
+        break;
+
+    /* ── SETFILT: Lọc theo ip_proto (0=all, 6=TCP, 17=UDP, 1=ICMP) ── */
+    case AICSEMI_CMD_SETFILT:
+        if (copy_from_user(&filt, data, sizeof(filt)))
+            return -EFAULT;
+        r->filter = filt;
+        alog_ok("Ring filter đặt thành: %u (0=all, 6=TCP, 17=UDP, 1=ICMP)",
+                filt);
+        break;
+
+    /* ── GETSTATS: Export thống kê tổng hợp ── */
+    case AICSEMI_CMD_GETSTATS:
+        alog("  [ioctl] GETSTATS: copy stats → userspace data=%p", data);
+        if (!data) return -EINVAL;
+        memset(&st, 0, sizeof(st));
+        st.tx_total   = atomic64_read(&priv->stats.total);
+        st.tx_bytes   = atomic64_read(&priv->stats.bytes_total);
+        st.tx_dropped = atomic64_read(&priv->stats.tx_dropped);
+        st.rx_total   = atomic64_read(&priv->stats.rx_total);
+        st.rx_bytes   = atomic64_read(&priv->stats.rx_bytes);
+        st.tcp        = atomic64_read(&priv->stats.tcp);
+        st.udp        = atomic64_read(&priv->stats.udp);
+        st.icmp       = atomic64_read(&priv->stats.icmp);
+        st.arp        = atomic64_read(&priv->stats.arp);
+        st.ipv6       = atomic64_read(&priv->stats.ipv6);
+        st.other      = atomic64_read(&priv->stats.other);
+        st.uptime_sec = ktime_to_ns(ktime_sub(ktime_get(), r->start_time))
+                        / NSEC_PER_SEC;
+        strscpy(st.ifname,     dev->name,      sizeof(st.ifname));
+        strscpy(st.driver_ver, DRIVER_VERSION, sizeof(st.driver_ver));
+
+        if (copy_to_user(data, &st, sizeof(st)))
+            ret = -EFAULT;
+        break;
+
+    default:
+        ret = -EOPNOTSUPP;
+        break;
+    }
+    return ret;
+}
+
+/* ================================================================
  * ETHTOOL
  * ================================================================ */
 static void aicsemi_get_drvinfo(struct net_device *dev,
@@ -513,9 +718,7 @@ static int aicsemi_net_stop(struct net_device *dev)
 
 /*
  * ndo_start_xmit — Nhận gói từ network stack, phân tích và log
- *
- * Đây là điểm "chặn" gói khi userspace gửi:
- *   ping / demo.c / nc / curl → kernel stack → hàm này
+ * v4.0: Thêm ring_push() để lưu vào ring buffer cho monitor.c
  */
 static netdev_tx_t aicsemi_net_xmit(struct sk_buff *skb,
                                      struct net_device *dev)
@@ -527,6 +730,7 @@ static netdev_tx_t aicsemi_net_xmit(struct sk_buff *skb,
     char    src_mac[18], dst_mac[18];
     char    proto_str[20] = "KHÔNG RÕ";
     char    detail[120]   = "";
+    struct pkt_entry entry = {0};   /* ★ ring entry */
 
     if (skb->len < ETH_HLEN) {
         alog_warn("TX: gói quá ngắn (%d bytes) — bỏ qua", skb->len);
@@ -540,6 +744,13 @@ static netdev_tx_t aicsemi_net_xmit(struct sk_buff *skb,
     seq   = atomic64_inc_return(&priv->stats.total);
     atomic64_add(skb->len, &priv->stats.bytes_total);
     priv->last_tx_jiffies = jiffies;
+
+    /* ★ Điền ring entry cơ bản */
+    entry.ts_ns    = ktime_get_real_ns();
+    entry.seq      = (u32)seq;
+    entry.len      = (u32)skb->len;
+    entry.eth_proto = ntohs(proto);
+    entry.direction = 'T';
 
     /* Format MAC */
     snprintf(src_mac, sizeof(src_mac), "%pM", eth->h_source);
@@ -558,11 +769,21 @@ static netdev_tx_t aicsemi_net_xmit(struct sk_buff *skb,
         if (iph->protocol == IPPROTO_TCP) {
             atomic64_inc(&priv->stats.tcp);
             strscpy(proto_str, "IPv4 / TCP", sizeof(proto_str));
+            entry.ip_proto = IPPROTO_TCP;
+            entry.saddr = iph->saddr;
+            entry.daddr = iph->daddr;
 
             if (skb->len >= ETH_HLEN + iph->ihl*4 +
                             (int)sizeof(struct tcphdr)) {
                 struct tcphdr *th = (struct tcphdr *)
                     (skb->data + ETH_HLEN + iph->ihl*4);
+                entry.sport     = ntohs(th->source);
+                entry.dport     = ntohs(th->dest);
+                entry.tcp_flags = (th->syn ? 0x02 : 0) |
+                                  (th->ack ? 0x10 : 0) |
+                                  (th->fin ? 0x01 : 0) |
+                                  (th->rst ? 0x04 : 0) |
+                                  (th->psh ? 0x08 : 0);
                 snprintf(detail, sizeof(detail),
                          "  %pI4:%u  →  %pI4:%u  |  flags=[%s%s%s%s%s]  |  TTL=%u",
                          &iph->saddr, ntohs(th->source),
@@ -636,6 +857,7 @@ static netdev_tx_t aicsemi_net_xmit(struct sk_buff *skb,
         atomic64_inc(&priv->stats.ipv6);
         strscpy(proto_str, "IPv6", sizeof(proto_str));
         snprintf(detail, sizeof(detail), "  (gói IPv6)");
+        entry.ip_proto = 0x86; /* đánh dấu IPv6 */
 
     } else if (proto == htons(ETH_P_ARP)) {
         atomic64_inc(&priv->stats.arp);
@@ -650,6 +872,9 @@ static netdev_tx_t aicsemi_net_xmit(struct sk_buff *skb,
     }
 
 log_it:
+    /* ★ Đẩy vào ring buffer cho monitor.c */
+    ring_push(&priv->ring, &entry);
+
     /* ── In log gói tin ── */
     alog("  [TX #%-4llu] %s bytes=%-5d  src=%s  dst=%s",
          seq, proto_str, skb->len, src_mac, dst_mac);
@@ -690,6 +915,16 @@ static const struct net_device_ops aicsemi_netdev_ops = {
     .ndo_start_xmit  = aicsemi_net_xmit,
     .ndo_get_stats64 = aicsemi_get_stats64,
     .ndo_change_mtu  = aicsemi_change_mtu,
+    /*
+     * ndo_siocdevprivate: kernel ≥ 5.15
+     * ndo_do_ioctl     : kernel < 5.15
+     * Dùng #if để tự chọn đúng field.
+     */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+    .ndo_siocdevprivate = aicsemi_ioctl,
+#else
+    .ndo_do_ioctl       = aicsemi_ioctl,
+#endif
 };
 
 /* ================================================================
@@ -785,6 +1020,16 @@ static int aicsemi_probe(struct usb_interface *intf,
 
     timer_setup(&priv->watchdog, aicsemi_watchdog, 0);
     alog_ok("Watchdog timer đã khởi tạo (chu kỳ 1000ms)");
+
+    /* ★ Init ring buffer */
+    atomic_set(&priv->ring.head,  -1);
+    atomic_set(&priv->ring.count,  0);
+    spin_lock_init(&priv->ring.rd_lock);
+    priv->ring.filter     = 0;   /* chấp nhận tất cả */
+    priv->ring.start_time = ktime_get();
+    alog_ok("Ring buffer khởi tạo: %d entries × %zu bytes = %zu KB",
+            MON_RING_SIZE, sizeof(struct pkt_entry),
+            sizeof(struct pkt_entry) * MON_RING_SIZE / 1024);
 
     /* ── Xử lý theo mode ── */
     if (pid == PID_STORAGE) {

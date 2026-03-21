@@ -1,144 +1,147 @@
 # ================================================================
-# Makefile - AIC Semi USB Multi-Mode Network Driver
-# Hỗ trợ: auto-detect major number, /dev node, proc monitor
+# Makefile — AIC Semi USB Multi-Mode Network Driver v4.0
+# Đề tài: Phát triển USB Network Driver + Packet Monitor
 # ================================================================
 
 obj-m      := usb.o
 DRIVER     := usb
 KERNEL_DIR := /lib/modules/$(shell uname -r)/build
 PWD        := $(shell pwd)
-DEV_NODE   := /dev/aicsemi_ctl
-
-# ── Auto-detect major number từ /proc/devices ──────────────────
-# Dùng sau khi insmod. Trả về rỗng nếu chưa load.
-MAJOR := $(shell grep "$(DRIVER)\|aicsemi" /proc/devices 2>/dev/null | awk '{print $$1}' | head -1)
 
 # ─────────────────────────────────────────────────────────────
-all:
+# all: build kernel module + monitor + demo
+# ─────────────────────────────────────────────────────────────
+all: module monitor_tool demo_tool
+	@echo ""
+	@echo "  ╔══════════════════════════════════════════════╗"
+	@echo "  ║  BUILD HOÀN THÀNH                            ║"
+	@echo "  ╠══════════════════════════════════════════════╣"
+	@echo "  ║  usb.ko   — kernel driver                    ║"
+	@echo "  ║  monitor  — packet monitor dashboard         ║"
+	@echo "  ║  demo     — raw packet sender                ║"
+	@echo "  ╠══════════════════════════════════════════════╣"
+	@echo "  ║  Thứ tự chạy:                                ║"
+	@echo "  ║  1. sudo ./setup.bash   (load driver)        ║"
+	@echo "  ║  2. sudo ./monitor aic0 (mở dashboard)       ║"
+	@echo "  ║  3. sudo ./demo         (gửi packets)        ║"
+	@echo "  ╚══════════════════════════════════════════════╝"
+
+module:
 	@echo "======================================================"
-	@echo " Building : $(DRIVER).ko"
-	@echo " Kernel   : $(shell uname -r)"
-	@echo " Arch     : $(shell uname -m)"
+	@echo " Building kernel module: $(DRIVER).ko"
+	@echo " Kernel : $(shell uname -r)"
+	@echo " Arch   : $(shell uname -m)"
 	@echo "======================================================"
 	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) modules
-	@echo ""
 	@echo "  Size    : $(shell du -h $(DRIVER).ko 2>/dev/null | cut -f1)"
 	@echo "  vermagic: $(shell modinfo $(DRIVER).ko 2>/dev/null | grep vermagic | awk '{print $$2}')"
-	@echo ""
 	@echo "Build OK: $(DRIVER).ko"
+
+monitor_tool: monitor.c
+	@echo "[monitor] Building packet monitor..."
+	@if pkg-config --libs ncurses >/dev/null 2>&1; then \
+		gcc -Wall -O2 -o monitor monitor.c $$(pkg-config --libs ncurses) && \
+		echo "  OK: monitor"; \
+	else \
+		gcc -Wall -O2 -o monitor monitor.c -lncurses && \
+		echo "  OK: monitor"; \
+	fi
+
+demo_tool: demo.c
+	@echo "[demo] Building demo..."
+	gcc -Wall -O2 -o demo demo.c
+	@echo "  OK: demo"
 
 # ─────────────────────────────────────────────────────────────
 clean:
 	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean
+	rm -f monitor demo
 	@echo "Cleaned."
 
 # ─────────────────────────────────────────────────────────────
-# install: tháo module cũ + module cạnh tranh → insmod → tạo /dev
+# install: build + unbind usb-storage + insmod + setup interface
+# ─────────────────────────────────────────────────────────────
 install: all
 	@echo "[*] Gỡ module cũ nếu có..."
-	-sudo rmmod $(DRIVER)    2>/dev/null || true
-	@echo "[*] Gỡ module cạnh tranh..."
-	-sudo rmmod usb_storage  2>/dev/null || true
-	-sudo rmmod uas          2>/dev/null || true
-	@echo "[*] Load driver mới..."
+	-sudo rmmod $(DRIVER) 2>/dev/null || true
+	@echo "[*] Unbind usb-storage nếu đang chiếm thiết bị AIC..."
+	@for d in /sys/bus/usb/devices/*/; do \
+		[ -f "$${d}idVendor" ] || continue; \
+		v=$$(cat "$${d}idVendor" 2>/dev/null); \
+		[ "$$v" = "a69c" ] || continue; \
+		dev=$$(basename $$d); \
+		intf="$${dev}:1.0"; \
+		if [ -L "/sys/bus/usb/devices/$${intf}/driver" ]; then \
+			drv=$$(readlink "/sys/bus/usb/devices/$${intf}/driver" | xargs basename); \
+			if [ "$$drv" = "usb-storage" ] || [ "$$drv" = "usb_storage" ]; then \
+				echo "  Unbind: $$drv từ $$intf"; \
+				echo -n "$$intf" > /sys/bus/usb/drivers/usb-storage/unbind 2>/dev/null || true; \
+			fi; \
+		fi; \
+	done
+	@echo "[*] Load driver..."
 	sudo insmod $(DRIVER).ko
-	@sleep 1
+	@sleep 2
+	@echo "[*] Bật interface aic0 nếu có..."
+	-sudo ip link set aic0 up 2>/dev/null || true
+	-sudo ip addr add 192.168.99.1/24 dev aic0 2>/dev/null || true
 	@echo ""
-	@$(MAKE) -s mknod_auto
-	@echo ""
-	@echo "Driver loaded. Xem log: sudo dmesg | tail -20"
-
-# ─────────────────────────────────────────────────────────────
-# mknod_auto: tự động đọc major từ /proc/devices và tạo /dev node
-mknod_auto:
-	$(eval MAJOR_NOW := $(shell grep "aicsemi" /proc/devices 2>/dev/null | awk '{print $$1}' | head -1))
-	@if [ -n "$(MAJOR_NOW)" ]; then \
-	    echo "[MAJOR] Tìm thấy major number = $(MAJOR_NOW)"; \
-	    echo "[MKNOD] Tạo $(DEV_NODE) (char $(MAJOR_NOW):0)"; \
-	    sudo rm -f $(DEV_NODE); \
-	    sudo mknod $(DEV_NODE) c $(MAJOR_NOW) 0; \
-	    sudo chmod 666 $(DEV_NODE); \
-	    echo "  OK: $(DEV_NODE) → major=$(MAJOR_NOW), minor=0"; \
-	else \
-	    echo "[INFO] Không tìm thấy char device 'aicsemi' trong /proc/devices"; \
-	    echo "[INFO] Driver dùng net_device (network interface, không cần /dev node)"; \
-	    echo "[INFO] Kiểm tra: cat /proc/devices | grep -i usb"; \
-	fi
+	@echo "Driver loaded. Các bước tiếp:"
+	@echo "  sudo ./monitor aic0   # mở dashboard"
+	@echo "  sudo ./demo           # gửi packets"
+	@echo "  sudo dmesg | grep aicsemi | tail -20"
 
 # ─────────────────────────────────────────────────────────────
 remove:
-	@echo "[*] Hạ interface xuống..."
-	-sudo ip link set usb0 down    2>/dev/null || true
-	-sudo ip addr flush dev usb0   2>/dev/null || true
-	@echo "[*] Xoá /dev node..."
-	-sudo rm -f $(DEV_NODE)
-	@echo "[*] Unload module..."
-	sudo rmmod $(DRIVER) 2>/dev/null || true
+	-sudo ip link set aic0 down    2>/dev/null || true
+	-sudo ip addr flush dev aic0   2>/dev/null || true
+	-sudo rmmod $(DRIVER)          2>/dev/null || true
 	@echo "Driver removed."
 
-# ─────────────────────────────────────────────────────────────
 reload: remove
 	@sleep 1
 	$(MAKE) install
 
 # ─────────────────────────────────────────────────────────────
-# info: hiển thị thông tin đầy đủ về module đang chạy
 info:
 	@echo "======================================================"
-	@echo " MODULE INFO"
+	@echo " TRẠNG THÁI DRIVER"
 	@echo "======================================================"
 	@echo "  lsmod:"
-	@lsmod | grep "$(DRIVER)" || echo "  (chưa load)"
-	@echo ""
-	@echo "  /proc/devices:"
-	@grep "aicsemi" /proc/devices 2>/dev/null || echo "  (không có entry)"
-	@echo ""
-	@echo "  /dev node:"
-	@ls -la $(DEV_NODE) 2>/dev/null || echo "  (không có)"
+	@lsmod | grep -E "$(DRIVER)|aicsemi" || echo "  (chưa load)"
 	@echo ""
 	@echo "  Network interfaces:"
-	@ip link show | grep -E "usb[0-9]" || echo "  (không có)"
+	@ip link show | grep -E "aic[0-9]|usb[0-9]" || echo "  (không có)"
 	@echo ""
 	@echo "  /proc monitor:"
-	@ls /proc/aicsemi_usbnet/ 2>/dev/null || echo "  (chưa có - thiết bị chưa ở WiFi mode)"
+	@ls /proc/aicsemi_usbnet/ 2>/dev/null && \
+		cat /proc/aicsemi_usbnet/monitor 2>/dev/null || \
+		echo "  (chưa có — thiết bị chưa ở WiFi mode)"
 	@echo "======================================================"
 
-# ─────────────────────────────────────────────────────────────
 log:
-	@sudo dmesg | grep -E "\[aicsemi|aicsemi_" | tail -40
+	@sudo dmesg | grep -E "\[aicsemi\]" | tail -40
 
-# ─────────────────────────────────────────────────────────────
-monitor:
-	@cat $(PROC_MONITOR) 2>/dev/null || echo "Monitor chưa khởi động (thiết bị ở Storage mode?)"
+# Xem /proc stats (không dùng ncurses)
+proc_monitor:
+	@watch -n 1 cat /proc/aicsemi_usbnet/monitor
 
-PROC_MONITOR := /proc/aicsemi_usbnet/monitor
-
-# ─────────────────────────────────────────────────────────────
-demo:
-	@echo "[demo] Bật interface..."
-	-sudo ip link set usb0 up
-	@echo "[demo] Đặt IP..."
-	-sudo ip addr add 192.168.99.1/24 dev usb0 2>/dev/null
-	@echo "[demo] Ping test..."
-	-ping -c 5 -W 1 192.168.99.2
-	@echo "[demo] Thống kê:"
-	@$(MAKE) -s monitor
-	@echo "[demo] Log:"
-	@$(MAKE) -s log
-
-# ─────────────────────────────────────────────────────────────
 help:
 	@echo ""
-	@echo "  make              - Build module"
-	@echo "  make install      - Build + insmod + tạo /dev node tự động"
-	@echo "  make remove       - rmmod + xoá /dev node"
+	@echo "  make              - Build usb.ko + monitor + demo"
+	@echo "  make install      - Build + load driver tự động"
+	@echo "  make remove       - Unload driver"
 	@echo "  make reload       - remove + install"
-	@echo "  make mknod_auto   - Chỉ tạo /dev node (sau khi insmod)"
-	@echo "  make info         - Hiển thị trạng thái đầy đủ"
+	@echo "  make info         - Xem trạng thái đầy đủ"
 	@echo "  make log          - Xem dmesg filtered"
-	@echo "  make monitor      - Xem packet stats (/proc)"
-	@echo "  make demo         - Test nhanh: up interface + ping"
+	@echo "  make proc_monitor - watch /proc/aicsemi_usbnet/monitor"
 	@echo "  make clean        - Dọn file build"
 	@echo ""
+	@echo "  Thứ tự chạy tay:"
+	@echo "    sudo ./setup.bash     # setup đầy đủ + hỏi Y/n chạy demo"
+	@echo "    sudo ./monitor aic0   # dashboard (mở trước demo)"
+	@echo "    sudo ./demo           # gửi packets"
+	@echo ""
 
-.PHONY: all clean install remove reload mknod_auto info log monitor demo help
+.PHONY: all module monitor_tool demo_tool clean install remove \
+        reload info log proc_monitor help
