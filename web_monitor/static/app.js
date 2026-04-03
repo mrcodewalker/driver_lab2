@@ -1,4 +1,4 @@
-﻿/* app.js - AIC Semi USB Driver Web Monitor v5.0 */
+/* app.js - AIC Semi USB Driver Web Monitor v5.0 */
 "use strict";
 
 const PROTO_COLORS = {
@@ -221,7 +221,7 @@ function renderSecEvents(events, counts) {
            </div>`
         : "";
 
-    const show = [...events].reverse().slice(0, isFallback ? 8 : 12);
+    const show = [...events].reverse().slice(0, isFallback ? 20 : 50);
     grid.innerHTML = banner + show.map((ev, idx) => {
         const realIdx = events.length - 1 - idx;
         const isTamp = ev.kind === "tamper";
