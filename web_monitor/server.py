@@ -8,11 +8,12 @@ import subprocess, os, re, json, time, threading
 from flask import Flask, jsonify, request, send_from_directory, Response
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-app.config["JSON_AS_ASCII"] = False   # giữ nguyên UTF-8 trong JSON response
+app.config["JSON_AS_ASCII"] = False
 app.config["JSONIFY_MIMETYPE"] = "application/json; charset=utf-8"
 DRIVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LOG_BUFFER = []   # lưu log realtime tối đa 200 dòng
-LOG_LOCK   = threading.Lock()
+LOG_BUFFER  = []
+LOG_LOCK    = threading.Lock()
+SERVER_START_TIME = time.time()   # timestamp khi server khởi động
 
 def push_log(line: str):
     with LOG_LOCK:
@@ -116,35 +117,77 @@ def parse_proc(text: str) -> dict:
                 d[raw_key] = val
     return d
 
+def get_uptime_seconds():
+    """Lấy uptime hệ thống (giây) — dmesg timestamp tính từ boot"""
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return 0.0
+
+def dmesg_since_start(all_lines):
+    """
+    Lọc chỉ lấy các dòng dmesg xuất hiện SAU khi server start.
+    dmesg timestamp là giây kể từ boot.
+    SERVER_START_TIME là epoch, uptime là giây từ boot.
+    => dmesg_ts >= uptime - (now - server_start)
+    """
+    uptime   = get_uptime_seconds()
+    now      = time.time()
+    elapsed  = now - SERVER_START_TIME          # giây đã trôi qua kể từ start
+    cutoff   = uptime - elapsed                 # dmesg timestamp tối thiểu
+    # Thêm buffer 2s để không bỏ sót event ngay lúc start
+    cutoff  -= 2.0
+
+    filtered = []
+    for line in all_lines:
+        m = re.search(r"\[\s*(\d+\.\d+)\]", line)
+        if m:
+            ts = float(m.group(1))
+            if ts >= cutoff:
+                filtered.append(line)
+        # Dòng không có timestamp → bỏ qua
+    return filtered
+
 def get_dmesg_tail(n=30):
     r = run_cmd(["dmesg"])
-    lines = [l for l in r["stdout"].splitlines() if "aicsemi" in l]
-    return lines[-n:]
+    all_aic = [l for l in r["stdout"].splitlines() if "aicsemi" in l]
+    recent  = dmesg_since_start(all_aic)
+    return recent[-n:] if recent else all_aic[-n:]
 
 def get_security_events(n=60):
     """
-    Parse security events tu dmesg.
-    - Gom cac dong phu (Ciphertext hex, plaintext) vao event chinh truoc do
-      de tranh dem 1 goi TAMPER thanh 2 event.
-    - Fallback: neu driver cu, hien thi TX log.
+    Parse security events tu dmesg, chi lay events SAU khi server start.
+    - Gom dong phu (Ciphertext/plaintext) vao event chinh.
+    - Them ARP packet vao events (kind=plain).
+    - Fallback: driver cu -> hien thi TX log.
     """
     r = run_cmd(["dmesg"])
-    all_aic = [l for l in r["stdout"].splitlines() if "aicsemi" in l]
-    events  = []
+    all_aic  = [l for l in r["stdout"].splitlines() if "aicsemi" in l]
+    # Chi lay events sau khi server start
+    all_aic  = dmesg_since_start(all_aic)
+    events   = []
 
     crypto_keywords = ["hmac", "crypto", "security", "tamper", "encrypt", "plain", "cipher", "xor"]
     raw_crypto = [l for l in all_aic if any(k in l.lower() for k in crypto_keywords)]
 
-    if raw_crypto:
-        for line in raw_crypto:
-            lo   = line.lower()
-            ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
-            hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
-            msg  = re.sub(r"^\[.*?\]\s*", "", line)
-            msg  = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE).strip()
+    # Them ARP TX lines vao de hien thi
+    arp_lines = [l for l in all_aic if "arp" in l.lower() and "tx #" in l]
 
-            # Dong phu: Ciphertext hex hoac plaintext preview
-            # -> gan vao event truoc, KHONG tao event moi
+    if raw_crypto or arp_lines:
+        # Gop tat ca, sort theo timestamp
+        combined = raw_crypto + arp_lines
+        combined.sort(key=lambda l: float(re.search(r"\[\s*(\d+\.\d+)\]", l).group(1))
+                                    if re.search(r"\[\s*(\d+\.\d+)\]", l) else 0)
+
+        for line in combined:
+            lo    = line.lower()
+            ts_m  = re.search(r"\[\s*(\d+\.\d+)\]", line)
+            hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
+            msg   = re.sub(r"^\[.*?\]\s*", "", line)
+            msg   = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE).strip()
+
+            # Dong phu (Ciphertext/plaintext preview) -> gan vao event truoc
             is_sub = ("ciphertext" in lo or "plaintext" in lo) and "tx #" not in lo
             if is_sub and events:
                 if hex_m and not events[-1]["hex"]:
@@ -152,7 +195,19 @@ def get_security_events(n=60):
                 events[-1]["raw"] += " | " + msg
                 continue
 
-            # Dong chinh: xac dinh loai
+            # ARP packet -> kind = plain (khong co HMAC, binh thuong)
+            if "arp" in lo and "tx #" in lo and not any(k in lo for k in ["hmac","security","crypto"]):
+                events.append({
+                    "kind": "plain",
+                    "ts":   ts_m.group(1) if ts_m else "",
+                    "msg":  msg,
+                    "hex":  "",
+                    "raw":  line,
+                    "note": "ARP khong co payload -> khong verify HMAC (binh thuong)",
+                })
+                continue
+
+            # Dong chinh crypto
             if ("hmac fail" in lo) or ("security" in lo and "tx #" in lo):
                 kind = "tamper"
             elif "hmac ok" in lo and "tx #" in lo:
@@ -222,8 +277,7 @@ def api_dmesg():
 @app.route("/api/security")
 def api_security():
     events = get_security_events(80)
-    # Tổng hợp counts
-    counts = {"ok": 0, "tamper": 0, "info": 0, "detail": 0}
+    counts = {"ok": 0, "tamper": 0, "info": 0, "plain": 0}
     for e in events:
         counts[e["kind"]] = counts.get(e["kind"], 0) + 1
     return jsonify({"events": events, "counts": counts})

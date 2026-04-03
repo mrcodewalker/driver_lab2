@@ -188,6 +188,7 @@ async function loadSecEvents() {
 function renderSecEvents(events, counts) {
     const okCnt = counts.ok || 0;
     const tampCnt = counts.tamper || 0;
+    const arpCnt = counts.plain || 0;
     const infoCnt = (counts.info || 0) + (counts.detail || 0);
     const isFallback = events.length > 0 && events[0].fallback;
 
@@ -199,8 +200,8 @@ function renderSecEvents(events, counts) {
     } else {
         setEl("sec-enc-badge", "OK: " + okCnt);
         setEl("sec-tamp-badge", "TAMPER: " + tampCnt);
-        setEl("sec-plain-badge", "INFO: " + infoCnt);
-        setEl("ss-enc", okCnt); setEl("ss-tamp", tampCnt); setEl("ss-plain", infoCnt);
+        setEl("sec-plain-badge", "ARP: " + arpCnt);
+        setEl("ss-enc", okCnt); setEl("ss-tamp", tampCnt); setEl("ss-plain", arpCnt + infoCnt);
     }
 
     const grid = document.getElementById("sec-grid");
@@ -225,15 +226,19 @@ function renderSecEvents(events, counts) {
         const realIdx = events.length - 1 - idx;
         const isTamp = ev.kind === "tamper";
         const isOk = ev.kind === "ok";
+        const isPlain = ev.kind === "plain";   // ARP - no HMAC, normal
         const cls = isTamp ? "sec-event-fail" : isOk ? "sec-event-ok" : "sec-event-plain";
-        const icon = isTamp ? "&#128680;" : isOk ? "&#128272;" : "&#8505;";
+        const icon = isTamp ? "&#128680;" : isOk ? "&#128272;" : isPlain ? "&#128228;" : "&#8505;";
         const tcls = isTamp ? "sec-title-fail" : isOk ? "sec-title-ok" : "sec-title-plain";
         const title = isFallback
             ? (ev.msg.includes("TCP") ? "TCP packet"
                 : ev.msg.includes("DNS") || ev.msg.includes("UDP") ? "UDP/DNS packet"
                     : ev.msg.includes("ICMP") ? "ICMP packet"
                         : ev.msg.includes("ARP") ? "ARP packet" : "TX packet")
-            : (isTamp ? "HMAC FAIL -- Goi bi TAMPER" : isOk ? "HMAC OK -- Goi hop le" : "Crypto Info");
+            : isTamp ? "HMAC FAIL -- Goi bi TAMPER"
+                : isOk ? "HMAC OK -- Goi hop le"
+                    : isPlain ? "ARP -- Khong co HMAC (binh thuong)"
+                        : "Crypto Info";
         const short = ev.msg.length > 80 ? ev.msg.slice(0, 80) + "..." : ev.msg;
         const hexPart = ev.hex
             ? `<div class="sec-hex" style="margin-top:3px;opacity:.75">${escHtml(ev.hex)}</div>`
