@@ -51,13 +51,15 @@
 
 html,
 body {
-    height: 100%;
+    min-height: 100%;
+    height: auto;
     background: var(--bg-base);
     color: var(--text-primary);
     font-family: var(--font-sans);
     font-size: 13px;
     line-height: 1.5;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
 }
 
 /* ── Scrollbar ─────────────────────────────────── */
@@ -89,7 +91,8 @@ header {
     height: 56px;
     background: linear-gradient(180deg, #0d1526 0%, #0a0e17 100%);
     border-bottom: 1px solid var(--border);
-    backdrop-filter: blur(12px);
+    /* backdrop-filter chỉ hoạt động khi có nền — thêm solid bg */
+    background-color: #0d1526;
 }
 
 .header-inner {
@@ -195,8 +198,9 @@ main {
     display: flex;
     gap: 12px;
     padding: 12px;
-    height: calc(100vh - 56px);
-    overflow: hidden;
+    /* Không dùng height cố định — để nội dung tự quyết định chiều cao */
+    align-items: flex-start;
+    min-height: calc(100vh - 56px);
 }
 
 .sidebar {
@@ -205,7 +209,7 @@ main {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    overflow-y: auto;
+    /* Không overflow-y: auto ở đây — để sidebar tự cao theo nội dung */
 }
 
 .sidebar-right {
@@ -217,8 +221,8 @@ main {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    overflow-y: auto;
     min-width: 0;
+    /* Không overflow-y: auto — để page scroll */
 }
 
 /* ══════════════════════════════════════════════════
@@ -230,24 +234,25 @@ main {
     border-radius: var(--radius);
     padding: 14px;
     position: relative;
-    overflow: hidden;
+    /* Bỏ overflow: hidden — nó clip dropdown, tooltip, focus ring */
 }
 
 .card::before {
     content: '';
     position: absolute;
     top: 0;
-    left: 0;
-    right: 0;
+    left: 16px;
+    right: 16px;
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(59, 130, 246, .3), transparent);
+    background: linear-gradient(90deg, transparent, rgba(59, 130, 246, .4), transparent);
+    border-radius: 1px;
+    pointer-events: none;
 }
 
 .card-grow {
-    flex: 1;
     display: flex;
     flex-direction: column;
-    min-height: 0;
+    /* Không dùng flex: 1 + min-height: 0 nữa vì không còn fixed container */
 }
 
 .card-title {
@@ -466,6 +471,21 @@ main {
     gap: 7px;
 }
 
+@media (max-width: 1100px) {
+    .actions-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    main {
+        flex-wrap: wrap;
+    }
+
+    .sidebar,
+    .sidebar-right {
+        width: 100%;
+    }
+}
+
 /* ══════════════════════════════════════════════════
    INPUTS
 ══════════════════════════════════════════════════ */
@@ -630,7 +650,6 @@ select.inp {
    LOG BOXES
 ══════════════════════════════════════════════════ */
 .log-box {
-    flex: 1;
     overflow-y: auto;
     font-family: var(--font-mono);
     font-size: 11px;
@@ -639,7 +658,8 @@ select.inp {
     border-radius: var(--radius-sm);
     padding: 10px;
     line-height: 1.7;
-    min-height: 80px;
+    /* Chiều cao cố định — scroll bên trong box, không phải page */
+    height: 260px;
 }
 
 .log-line {
@@ -685,7 +705,7 @@ select.inp {
     border-radius: var(--radius-sm);
     padding: 10px;
     white-space: pre-wrap;
-    max-height: 200px;
+    height: 200px;
     overflow-y: auto;
     line-height: 1.7;
 }
@@ -697,6 +717,7 @@ select.inp {
     width: 100%;
     display: block;
     border-radius: var(--radius-sm);
+    /* height tự động theo số giao thức — do JS set canvas.height */
 }
 
 /* ══════════════════════════════════════════════════

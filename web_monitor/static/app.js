@@ -18,56 +18,106 @@ function drawChart(data) {
     const canvas = document.getElementById("proto-chart");
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
-    const W = canvas.width = canvas.offsetWidth;
-    const H = canvas.height = 160;
-    ctx.clearRect(0, 0, W, H);
-
+    const W = canvas.width = canvas.offsetWidth || 400;
     const keys = Object.keys(data);
     const vals = keys.map(k => data[k]);
-    const total = vals.reduce((a, b) => a + b, 0) || 1;
-    const cx = W / 2, cy = H / 2, r = Math.min(cx, cy) - 16;
+    const total = Math.max(vals.reduce((a, b) => a + b, 0), 1);
+    const max = Math.max(...vals, 1);
 
-    // Donut
-    let angle = -Math.PI / 2;
+    // Layout
+    const ROW_H = 36;   // chiều cao mỗi row (bar + gap)
+    const BAR_H = 20;   // chiều cao thanh bar
+    const PAD_L = 52;   // cột label bên trái
+    const PAD_R = 64;   // cột số bên phải
+    const PAD_T = 14;   // padding top
+    const PAD_B = 10;
+    const H = PAD_T + keys.length * ROW_H + PAD_B;
+    canvas.height = H;
+
+    ctx.clearRect(0, 0, W, H);
+
+    const TRACK_W = W - PAD_L - PAD_R;  // chiều rộng vùng bar
+
     keys.forEach((k, i) => {
-        const slice = (vals[i] / total) * Math.PI * 2;
+        const v = vals[i];
+        const pct = v / max;                        // tỉ lệ so với max (không phải total)
+        const fillW = Math.round(pct * TRACK_W);
+        const y = PAD_T + i * ROW_H;
+        const barY = y + (ROW_H - BAR_H) / 2;
+        const col = PROTO_COLORS[k] || "#8b949e";
+        const pctTot = Math.round(v * 100 / total);
+
+        // ── Track (nền xám) ──
         ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.arc(cx, cy, r, angle, angle + slice);
-        ctx.closePath();
-        ctx.fillStyle = PROTO_COLORS[k] || "#8b949e";
+        roundRect(ctx, PAD_L, barY, TRACK_W, BAR_H, 4);
+        ctx.fillStyle = "#1e2a3a";
         ctx.fill();
-        angle += slice;
-    });
 
-    // Inner hole
-    ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.55, 0, Math.PI * 2);
-    ctx.fillStyle = "#161b22";
-    ctx.fill();
+        // ── Fill bar ──
+        if (fillW > 0) {
+            // Gradient: màu solid → sáng hơn ở đầu
+            const grad = ctx.createLinearGradient(PAD_L, 0, PAD_L + fillW, 0);
+            grad.addColorStop(0, col + "99");   // mờ ở gốc
+            grad.addColorStop(1, col);           // đậm ở đầu
+            ctx.beginPath();
+            roundRect(ctx, PAD_L, barY, fillW, BAR_H, 4);
+            ctx.fillStyle = grad;
+            ctx.fill();
 
-    // Center text
-    ctx.fillStyle = "#e6edf3";
-    ctx.font = "bold 18px monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(total, cx, cy - 6);
-    ctx.font = "10px sans-serif";
-    ctx.fillStyle = "#8b949e";
-    ctx.fillText("total TX", cx, cy + 10);
+            // Glow effect — vẽ lại với shadow
+            ctx.save();
+            ctx.shadowColor = col;
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            roundRect(ctx, PAD_L + fillW - 3, barY + 2, 3, BAR_H - 4, 2);
+            ctx.fillStyle = col;
+            ctx.fill();
+            ctx.restore();
+        }
 
-    // Legend (right side)
-    const lx = cx + r + 12;
-    let ly = cy - (keys.length * 14) / 2;
-    keys.forEach((k, i) => {
-        const pct = Math.round(vals[i] * 100 / total);
-        ctx.fillStyle = PROTO_COLORS[k] || "#8b949e";
-        ctx.fillRect(lx, ly + i * 16, 8, 8);
-        ctx.fillStyle = "#8b949e";
-        ctx.font = "10px sans-serif";
+        // ── Label trái (tên giao thức) ──
+        ctx.fillStyle = "#64748b";
+        ctx.font = "500 11px 'JetBrains Mono', monospace";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        ctx.fillText(k, PAD_L - 8, barY + BAR_H / 2);
+
+        // ── Số gói + % bên phải ──
+        ctx.fillStyle = col;
+        ctx.font = "600 11px 'JetBrains Mono', monospace";
         ctx.textAlign = "left";
-        ctx.fillText(`${k} ${pct}%`, lx + 12, ly + i * 16 + 7);
+        ctx.fillText(fmtNum(v), PAD_L + TRACK_W + 8, barY + BAR_H / 2 - 5);
+        ctx.fillStyle = "#334155";
+        ctx.font = "400 10px 'JetBrains Mono', monospace";
+        ctx.fillText(pctTot + "%", PAD_L + TRACK_W + 8, barY + BAR_H / 2 + 7);
     });
+
+    // ── Đường kẻ dọc grid (mờ) ──
+    ctx.strokeStyle = "#162030";
+    ctx.lineWidth = 1;
+    [0.25, 0.5, 0.75, 1].forEach(t => {
+        const x = PAD_L + Math.round(t * TRACK_W);
+        ctx.beginPath();
+        ctx.moveTo(x, PAD_T);
+        ctx.lineTo(x, H - PAD_B);
+        ctx.stroke();
+    });
+}
+
+// Helper: vẽ rect bo góc (polyfill cho ctx.roundRect cũ)
+function roundRect(ctx, x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
 }
 
 // ── Utilities ─────────────────────────────────────────────────
@@ -233,21 +283,8 @@ async function refreshStatus() {
     }
 }
 
-function drawProtoBars(data) {
-    const box = document.getElementById("proto-bars");
-    if (!box) return;
-    const total = Object.values(data).reduce((a, b) => a + b, 0) || 1;
-    box.innerHTML = Object.entries(data).map(([k, v]) => {
-        const pct = Math.round(v * 100 / total);
-        const col = PROTO_COLORS[k] || "#8b949e";
-        return `<div class="proto-bar-row">
-      <div class="proto-bar-lbl">${k}</div>
-      <div class="proto-bar-track">
-        <div class="proto-bar-fill" style="width:${pct}%;background:${col}"></div>
-      </div>
-      <div class="proto-bar-cnt">${fmtNum(v)}</div>
-    </div>`;
-    }).join("");
+function drawProtoBars(_data) {
+    // Đã được thay thế bởi drawChart (horizontal bar canvas)
 }
 
 // ── dmesg ──────────────────────────────────────────────────────
@@ -398,6 +435,8 @@ async function refreshAll() {
 (async function init() {
     updateClock();
     setInterval(updateClock, 1000);
+    // Vẽ chart placeholder ngay khi load
+    drawChart(_chartData);
     await refreshAll();
     setInterval(refreshStatus, 3000);
     setInterval(pollLog, 1500);
