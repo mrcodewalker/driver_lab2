@@ -7,6 +7,8 @@ obj-m      := usb.o
 DRIVER     := usb
 KERNEL_DIR := /lib/modules/$(shell uname -r)/build
 PWD        := $(shell pwd)
+# Cần crypto subsystem cho HMAC-SHA256
+ccflags-y  := -DCONFIG_CRYPTO_HMAC=1
 
 # ─────────────────────────────────────────────────────────────
 # all: build kernel module + monitor + demo

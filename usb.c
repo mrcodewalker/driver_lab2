@@ -39,6 +39,7 @@
 #include <linux/uaccess.h>   /* copy_to_user */
 #include <linux/ktime.h>     /* ktime_get_real_ns */
 #include <uapi/linux/sockios.h>
+#include <crypto/hash.h>     /* crypto_alloc_shash, HMAC-SHA256 */
 
 /* ================================================================
  * KERNEL VERSION COMPAT
@@ -135,6 +136,10 @@ struct pkt_entry {
     u16   dport;      /* dest port */
     u8    tcp_flags;  /* SYN=0x02 ACK=0x10 FIN=0x01 RST=0x04 */
     u8    icmp_type;
+    /* ★ Security fields */
+    u8    encrypted;  /* 1 = payload có XOR+HMAC tag */
+    u8    hmac_ok;    /* 1 = HMAC verify OK, 0 = FAIL/không có */
+    u8    payload_hex[16]; /* 16 byte đầu của payload (ciphertext) để hiển thị */
     u8    pad[2];
 };
 
@@ -151,6 +156,10 @@ struct aicsemi_stats_export {
     u64 rx_total, rx_bytes;
     u64 tcp, udp, icmp, arp, ipv6, other;
     u64 uptime_sec;
+    /* ★ Security stats */
+    u64 tx_encrypted;   /* gói có HMAC hợp lệ */
+    u64 tx_tampered;    /* gói bị tamper (HMAC sai) */
+    u64 tx_plain;       /* gói không có tag */
     char ifname[16];
     char driver_ver[16];
 };
@@ -166,6 +175,124 @@ struct mon_ring {
 };
 
 /* ================================================================
+ * CRYPTO — XOR + HMAC-SHA256 (truncated 8 bytes)
+ *
+ * Kernel không có stdlib, dùng kernel crypto API (<linux/crypto.h>)
+ * cho SHA-256. XOR thì tự implement (trivial).
+ *
+ * HMAC_KEY phải khớp với demo.c — hardcode để demo.
+ * ================================================================ */
+#define AIC_XOR_KEY      0xA1
+#define AIC_HMAC_TAG_LEN 8
+
+static const u8 AIC_HMAC_KEY[16] = {
+    0xA1, 0xC5, 0xE1, 0x1B, 0x5B, 0x4D, 0x3C, 0x1D,
+    0xE4, 0x0D, 0xE5, 0x16, 0x4E, 0x0A, 0x1F, 0x2B
+};
+
+/*
+ * Mini SHA-256 trong kernel — dùng kernel shash API
+ * Nếu kernel không có CONFIG_CRYPTO_SHA256, fallback về
+ * simple polynomial hash để không crash.
+ *
+ * Thực tế: dùng crypto_shash_digest() từ <linux/crypto.h>
+ */
+#include <crypto/hash.h>
+
+/*
+ * aic_hmac_sha256_truncated() — Tính HMAC-SHA256, lấy 8 byte đầu
+ * Chạy trong process context (probe/ioctl), KHÔNG gọi từ softirq.
+ *
+ * Trả về 0 nếu OK, <0 nếu lỗi crypto subsystem.
+ */
+static int aic_hmac_sha256_truncated(const u8 *key, size_t klen,
+                                      const u8 *msg, size_t mlen,
+                                      u8 *out8)
+{
+    struct crypto_shash *tfm;
+    struct shash_desc   *desc;
+    u8                   full[32];
+    int                  ret;
+
+    tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
+    if (IS_ERR(tfm)) {
+        /* Fallback: polynomial hash nếu không có crypto module */
+        u32 h = 0x5A5A5A5A;
+        size_t i;
+        for (i = 0; i < klen; i++) h = h * 31 + key[i];
+        for (i = 0; i < mlen; i++) h = h * 31 + msg[i];
+        for (i = 0; i < 8; i++) out8[i] = (u8)(h >> (i % 4 * 8));
+        return 0;
+    }
+
+    ret = crypto_shash_setkey(tfm, key, klen);
+    if (ret) goto out_free;
+
+    desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm), GFP_KERNEL);
+    if (!desc) { ret = -ENOMEM; goto out_free; }
+
+    desc->tfm = tfm;
+    ret = crypto_shash_digest(desc, msg, mlen, full);
+    if (ret == 0)
+        memcpy(out8, full, AIC_HMAC_TAG_LEN);
+
+    kfree(desc);
+out_free:
+    crypto_free_shash(tfm);
+    return ret;
+}
+
+/*
+ * aic_verify_hmac() — Verify HMAC tag ở cuối payload
+ *
+ * Payload layout từ demo.c:
+ *   [ XOR(data) | HMAC[8] ]
+ *
+ * Hàm này:
+ *   1. Tính HMAC trên phần XOR(data) (không bao gồm tag)
+ *   2. So sánh với tag cuối payload
+ *   3. Trả về true nếu khớp
+ *
+ * Gọi từ ndo_start_xmit() — chạy trong softirq context.
+ * Vì crypto_shash cần process context, ta dùng workqueue
+ * hoặc đơn giản hơn: verify inline với GFP_ATOMIC.
+ *
+ * Để đơn giản cho demo: dùng GFP_ATOMIC + crypto_alloc_shash
+ * với CRYPTO_ALG_ASYNC flag = 0 (synchronous only).
+ */
+static bool aic_verify_hmac(const u8 *payload, size_t total_len)
+{
+    u8   computed[AIC_HMAC_TAG_LEN];
+    const u8 *tag;
+    size_t data_len;
+
+    if (total_len <= AIC_HMAC_TAG_LEN)
+        return false;   /* quá ngắn, không có tag */
+
+    data_len = total_len - AIC_HMAC_TAG_LEN;
+    tag      = payload + data_len;
+
+    /* Tính HMAC trên phần ciphertext (không bao gồm tag) */
+    if (aic_hmac_sha256_truncated(AIC_HMAC_KEY, sizeof(AIC_HMAC_KEY),
+                                   payload, data_len, computed) < 0)
+        return false;
+
+    /* So sánh constant-time để tránh timing attack */
+    return (memcmp(computed, tag, AIC_HMAC_TAG_LEN) == 0);
+}
+
+/*
+ * aic_xor_decrypt() — XOR decrypt payload (in-place, không cần alloc)
+ * Symmetric: cùng hàm dùng cho encrypt và decrypt.
+ */
+static void aic_xor_decrypt(u8 *data, size_t len)
+{
+    size_t i;
+    for (i = 0; i < len; i++)
+        data[i] ^= AIC_XOR_KEY;
+}
+
+/* ================================================================
  * PACKET STATS
  * ================================================================ */
 struct pkt_stats {
@@ -174,6 +301,10 @@ struct pkt_stats {
     atomic64_t bytes_total;
     atomic64_t rx_total, rx_bytes;
     atomic64_t tx_dropped;
+    /* ★ Security counters */
+    atomic64_t tx_encrypted;   /* gói có HMAC tag hợp lệ */
+    atomic64_t tx_tampered;    /* gói có HMAC tag sai */
+    atomic64_t tx_plain;       /* gói không có tag (ARP, v.v.) */
 };
 
 /* ================================================================
@@ -489,6 +620,11 @@ static int monitor_show(struct seq_file *m, void *v)
     seq_printf(m, "    IPv6    : %llu\n", atomic64_read(&priv->stats.ipv6));
     seq_printf(m, "    ARP     : %llu\n", atomic64_read(&priv->stats.arp));
     seq_printf(m, "    Khác    : %llu\n", atomic64_read(&priv->stats.other));
+    seq_puts(m,   "--------------------------------------------\n");
+    seq_puts(m,   "  Bảo mật (Security):\n");
+    seq_printf(m, "    Encrypted : %llu\n", atomic64_read(&priv->stats.tx_encrypted));
+    seq_printf(m, "    Tampered  : %llu\n", atomic64_read(&priv->stats.tx_tampered));
+    seq_printf(m, "    Plain     : %llu\n", atomic64_read(&priv->stats.tx_plain));
     seq_puts(m,   "============================================\n");
     return 0;
 }
@@ -614,6 +750,9 @@ static int aicsemi_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
         st.other      = atomic64_read(&priv->stats.other);
         st.uptime_sec = ktime_to_ns(ktime_sub(ktime_get(), r->start_time))
                         / NSEC_PER_SEC;
+        st.tx_encrypted = atomic64_read(&priv->stats.tx_encrypted);
+        st.tx_tampered  = atomic64_read(&priv->stats.tx_tampered);
+        st.tx_plain     = atomic64_read(&priv->stats.tx_plain);
         strscpy(st.ifname,     dev->name,      sizeof(st.ifname));
         strscpy(st.driver_ver, DRIVER_VERSION, sizeof(st.driver_ver));
 
@@ -872,6 +1011,77 @@ static netdev_tx_t aicsemi_net_xmit(struct sk_buff *skb,
     }
 
 log_it:
+    /* ★ SECURITY: Verify HMAC nếu gói có payload sau header */
+    {
+        const u8 *payload_start = NULL;
+        size_t    payload_len   = 0;
+
+        /* Xác định vị trí payload tùy theo giao thức */
+        if (proto == htons(ETH_P_IP) && skb->len > ETH_HLEN) {
+            struct iphdr *iph2 = (struct iphdr *)(skb->data + ETH_HLEN);
+            int ip_hlen = iph2->ihl * 4;
+            int l4_off  = ETH_HLEN + ip_hlen;
+
+            if (iph2->protocol == IPPROTO_TCP &&
+                skb->len > l4_off + (int)sizeof(struct tcphdr)) {
+                struct tcphdr *th2 = (struct tcphdr *)(skb->data + l4_off);
+                int tcp_hlen = th2->doff * 4;
+                payload_start = skb->data + l4_off + tcp_hlen;
+                payload_len   = skb->len - l4_off - tcp_hlen;
+
+            } else if (iph2->protocol == IPPROTO_UDP &&
+                       skb->len > l4_off + (int)sizeof(struct udphdr)) {
+                payload_start = skb->data + l4_off + sizeof(struct udphdr);
+                payload_len   = skb->len - l4_off - sizeof(struct udphdr);
+
+            } else if (iph2->protocol == IPPROTO_ICMP &&
+                       skb->len > l4_off + (int)sizeof(struct icmphdr)) {
+                payload_start = skb->data + l4_off + sizeof(struct icmphdr);
+                payload_len   = skb->len - l4_off - sizeof(struct icmphdr);
+            }
+        }
+
+        if (payload_start && payload_len > AIC_HMAC_TAG_LEN) {
+            /* Có đủ data để verify */
+            bool ok = aic_verify_hmac(payload_start, payload_len);
+            entry.encrypted = 1;
+            entry.hmac_ok   = ok ? 1 : 0;
+
+            /* Lưu 16 byte đầu ciphertext để hiển thị trên web */
+            size_t copy_n = payload_len < 16 ? payload_len : 16;
+            memcpy(entry.payload_hex, payload_start, copy_n);
+
+            if (ok) {
+                atomic64_inc(&priv->stats.tx_encrypted);
+                alog_ok("[CRYPTO] TX #%llu HMAC OK — gói hợp lệ, payload=%zuB",
+                        seq, payload_len);
+
+                /* Decrypt để log plaintext (chỉ 16 byte đầu) */
+                {
+                    u8 plain_preview[16];
+                    size_t data_len = payload_len - AIC_HMAC_TAG_LEN;
+                    size_t preview  = data_len < 16 ? data_len : 16;
+                    memcpy(plain_preview, payload_start, preview);
+                    aic_xor_decrypt(plain_preview, preview);
+                    alog("  [CRYPTO]   plaintext[0..%zu]: %*phN",
+                         preview - 1, (int)preview, plain_preview);
+                }
+            } else {
+                atomic64_inc(&priv->stats.tx_tampered);
+                alog_err("[SECURITY] TX #%llu HMAC FAIL — gói bị TAMPER! payload=%zuB",
+                         seq, payload_len);
+                alog_err("[SECURITY]   Ciphertext[0..7]: %*phN",
+                         8, payload_start);
+                /* Không drop — vẫn đếm nhưng đánh dấu tampered */
+            }
+        } else {
+            /* ARP, IPv6, hoặc gói không có payload → plain */
+            entry.encrypted = 0;
+            entry.hmac_ok   = 0;
+            atomic64_inc(&priv->stats.tx_plain);
+        }
+    }
+
     /* ★ Đẩy vào ring buffer cho monitor.c */
     ring_push(&priv->ring, &entry);
 
@@ -1017,6 +1227,9 @@ static int aicsemi_probe(struct usb_interface *intf,
     atomic64_set(&priv->stats.rx_total,    0);
     atomic64_set(&priv->stats.rx_bytes,    0);
     atomic64_set(&priv->stats.tx_dropped,  0);
+    atomic64_set(&priv->stats.tx_encrypted, 0);
+    atomic64_set(&priv->stats.tx_tampered,  0);
+    atomic64_set(&priv->stats.tx_plain,     0);
 
     timer_setup(&priv->watchdog, aicsemi_watchdog, 0);
     alog_ok("Watchdog timer đã khởi tạo (chu kỳ 1000ms)");

@@ -258,6 +258,19 @@ async function refreshStatus() {
             setEl("s-icmp", fmtNum(p["ICMP"] || 0));
             setEl("s-arp", fmtNum(p["ARP"] || 0));
 
+            // Security counters từ /proc
+            const enc = Number(p["Encrypted"] || 0);
+            const tamp = Number(p["Tampered"] || 0);
+            const plain = Number(p["Plain"] || 0);
+            setEl("ss-enc", enc);
+            setEl("ss-tamp", tamp);
+            setEl("ss-plain", plain);
+            setEl("sec-enc-badge", "ENC: " + enc);
+            setEl("sec-tamp-badge", "TAMPER: " + tamp);
+            setEl("sec-plain-badge", "PLAIN: " + plain);
+            // Cập nhật security events từ dmesg
+            updateSecEvents(tamp);
+
             _chartData = {
                 TCP: Number(p["TCP"] || 0),
                 UDP: Number(p["UDP"] || 0),
@@ -285,6 +298,80 @@ async function refreshStatus() {
 
 function drawProtoBars(_data) {
     // Đã được thay thế bởi drawChart (horizontal bar canvas)
+}
+
+// ── Security Events ────────────────────────────────────────────
+
+let _lastTamperCount = 0;
+
+async function updateSecEvents(tampCount) {
+    const grid = document.getElementById("sec-grid");
+    if (!grid) return;
+
+    // Chỉ refresh khi có thay đổi
+    try {
+        const r = await fetch("/api/dmesg?n=80");
+        const d = await r.json();
+
+        // Lọc các dòng liên quan crypto/security
+        const secLines = d.lines.filter(l =>
+            /HMAC|CRYPTO|SECURITY|tamper|TAMPER|encrypt|PLAIN/i.test(l)
+        );
+
+        if (secLines.length === 0) {
+            grid.innerHTML = '<div class="sec-empty">Chưa có sự kiện — chạy demo để xem</div>';
+            return;
+        }
+
+        grid.innerHTML = secLines.slice(-20).reverse().map(line => {
+            const isOk = /HMAC OK|OK.*hợp lệ/i.test(line);
+            const isFail = /HMAC FAIL|TAMPER|tamper/i.test(line);
+            const isPlain = /PLAIN|plain/i.test(line);
+            const isCipher = /plaintext|ciphertext/i.test(line);
+
+            // Extract hex nếu có
+            const hexMatch = line.match(/([0-9a-f]{2}(?:\s[0-9a-f]{2})+)/i);
+            const hexStr = hexMatch ? hexMatch[0] : "";
+
+            // Timestamp từ dmesg [xxx.xxx]
+            const tsMatch = line.match(/\[\s*(\d+\.\d+)\]/);
+            const ts = tsMatch ? tsMatch[1] + "s" : "";
+
+            // Clean message
+            const msg = line.replace(/^\[.*?\]\s*/, "").replace(/\[aicsemi\]\s*/i, "");
+
+            if (isFail) return `
+                <div class="sec-event sec-event-fail">
+                    <div class="sec-icon">🚨</div>
+                    <div class="sec-body">
+                        <div class="sec-title sec-title-fail">HMAC FAIL — Gói bị TAMPER</div>
+                        <div class="sec-hex">${escHtml(msg)}</div>
+                        ${hexStr ? `<div class="sec-hex" style="color:#f87171">${hexStr}</div>` : ""}
+                    </div>
+                    <div class="sec-meta">${ts}</div>
+                </div>`;
+            if (isOk) return `
+                <div class="sec-event sec-event-ok">
+                    <div class="sec-icon">🔐</div>
+                    <div class="sec-body">
+                        <div class="sec-title sec-title-ok">HMAC OK — Gói hợp lệ</div>
+                        <div class="sec-hex">${escHtml(msg)}</div>
+                        ${hexStr ? `<div class="sec-hex" style="color:#34d399">${hexStr}</div>` : ""}
+                    </div>
+                    <div class="sec-meta">${ts}</div>
+                </div>`;
+            return `
+                <div class="sec-event sec-event-plain">
+                    <div class="sec-icon">📦</div>
+                    <div class="sec-body">
+                        <div class="sec-title sec-title-plain">Crypto info</div>
+                        <div class="sec-hex">${escHtml(msg)}</div>
+                    </div>
+                    <div class="sec-meta">${ts}</div>
+                </div>`;
+        }).join("");
+
+    } catch (e) { /* ignore */ }
 }
 
 // ── dmesg ──────────────────────────────────────────────────────

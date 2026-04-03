@@ -93,6 +93,18 @@
                         <div class="stat-lbl">ARP</div>
                     </div>
                 </div>
+                <!-- Security mini stats -->
+                <div class="sec-stats-row">
+                    <div class="sec-stat sec-enc"><span id="ss-enc">0</span>
+                        <div>Encrypted</div>
+                    </div>
+                    <div class="sec-stat sec-tamp"><span id="ss-tamp">0</span>
+                        <div>Tampered</div>
+                    </div>
+                    <div class="sec-stat sec-plain"><span id="ss-plain">0</span>
+                        <div>Plain</div>
+                    </div>
+                </div>
                 <div class="proto-bars" id="proto-bars" style="display:none"></div>
             </div>
 
@@ -146,6 +158,21 @@
                     <button class="btn btn-xs btn-gray" onclick="loadDmesg()">⟳</button>
                 </div>
                 <div class="log-box" id="dmesg-box"></div>
+            </div>
+
+            <!-- Security Events -->
+            <div class="card">
+                <div class="card-title-row">
+                    <span class="card-title">🔐 Security Events</span>
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <span class="badge badge-wifi" id="sec-enc-badge">ENC: 0</span>
+                        <span class="badge badge-none" id="sec-tamp-badge">TAMPER: 0</span>
+                        <span class="badge badge-storage" id="sec-plain-badge">PLAIN: 0</span>
+                    </div>
+                </div>
+                <div class="sec-grid" id="sec-grid">
+                    <div class="sec-empty">Chưa có sự kiện — chạy demo để xem</div>
+                </div>
             </div>
 
         </section>
