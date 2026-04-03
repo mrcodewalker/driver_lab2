@@ -7,7 +7,7 @@ Chạy: sudo python3 server.py
 import subprocess, os, re, json, time, threading
 from flask import Flask, jsonify, request, send_from_directory
 
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 DRIVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LOG_BUFFER = []   # lưu log realtime tối đa 200 dòng
 LOG_LOCK   = threading.Lock()
@@ -101,6 +101,10 @@ def get_dmesg_tail(n=30):
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+@app.route("/static/<path:filename>")
+def static_files(filename):
+    return send_from_directory("static", filename)
 
 @app.route("/api/status")
 def api_status():
