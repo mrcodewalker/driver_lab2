@@ -5,9 +5,11 @@ Backend Flask: gọi bash scripts, đọc /proc, chạy lệnh hệ thống
 Chạy: sudo python3 server.py
 """
 import subprocess, os, re, json, time, threading
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.config["JSON_AS_ASCII"] = False   # giữ nguyên UTF-8 trong JSON response
+app.config["JSONIFY_MIMETYPE"] = "application/json; charset=utf-8"
 DRIVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LOG_BUFFER = []   # lưu log realtime tối đa 200 dòng
 LOG_LOCK   = threading.Lock()
@@ -21,10 +23,11 @@ def push_log(line: str):
 def run_cmd(cmd: list[str], timeout=15) -> dict:
     """Chạy lệnh, trả về {ok, stdout, stderr, rc}"""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, cwd=DRIVER_DIR)
-        out = r.stdout.strip()
-        err = r.stderr.strip()
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                           cwd=DRIVER_DIR)
+        # Decode với errors='replace' để không crash khi có byte lạ
+        out = r.stdout.decode("utf-8", errors="replace").strip()
+        err = r.stderr.decode("utf-8", errors="replace").strip()
         for line in (out + "\n" + err).splitlines():
             if line.strip():
                 push_log(line)
@@ -83,12 +86,34 @@ def get_proc_monitor():
         return None
 
 def parse_proc(text: str) -> dict:
-    """Parse /proc/aicsemi_usbnet/monitor thành dict"""
+    """Parse /proc/aicsemi_usbnet/monitor thanh dict, normalize key sang ASCII"""
     d = {}
+    # Map key tieng Viet -> key ASCII ma JS dung
+    key_map = {
+        "TX tổng":   "TX tong",
+        "TX bytes":  "TX bytes",
+        "TX bị rớt": "TX bi rot",
+        "RX tổng":   "RX tong",
+        "RX bytes":  "RX bytes",
+        "Interface": "Interface",
+        "Trạng thái":"Trang thai",
+        "Encrypted": "Encrypted",
+        "Tampered":  "Tampered",
+        "Plain":     "Plain",
+        "Khác":      "Khac",
+    }
     for line in text.splitlines():
-        m = re.match(r"\s*([\w\s]+?)\s*:\s*(.+)", line)
+        m = re.match(r"\s*([\w\s\u00c0-\u024f\u1e00-\u1eff]+?)\s*:\s*(.+)", line)
         if m:
-            d[m.group(1).strip()] = m.group(2).strip()
+            raw_key = m.group(1).strip()
+            val     = m.group(2).strip()
+            # Dung key goc, dong thoi them key ASCII neu co map
+            d[raw_key] = val
+            if raw_key in key_map:
+                d[key_map[raw_key]] = val
+            # Cac key don gian (TCP, UDP, ICMP, ARP, IPv6)
+            if raw_key in ("TCP","UDP","ICMP","ARP","IPv6","Other"):
+                d[raw_key] = val
     return d
 
 def get_dmesg_tail(n=30):
@@ -155,7 +180,10 @@ def get_security_events(n=60):
 
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    with open(os.path.join(os.path.dirname(__file__), "static", "index.html"),
+              encoding="utf-8") as f:
+        content = f.read()
+    return Response(content, mimetype="text/html; charset=utf-8")
 
 @app.route("/static/<path:filename>")
 def static_files(filename):

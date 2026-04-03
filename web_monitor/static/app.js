@@ -1,4 +1,5 @@
-﻿/* app.js â€” AIC Semi USB Driver Web Monitor v5.0 */
+﻿/* app.js - AIC Semi USB Driver Web Monitor v5.0 */
+"use strict";
 
 const PROTO_COLORS = {
     TCP: "#58a6ff", UDP: "#d29922", ICMP: "#bc8cff",
@@ -7,7 +8,7 @@ const PROTO_COLORS = {
 let _chartData = { TCP: 0, UDP: 0, ICMP: 0, ARP: 0, IPv6: 0, Other: 0 };
 let _secEvents = [];
 
-// â”€â”€ Canvas horizontal bar chart â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Canvas horizontal bar chart ──────────────────────────────
 function drawChart(data) {
     const canvas = document.getElementById("proto-chart");
     if (!canvas) return;
@@ -60,20 +61,36 @@ function roundRect(ctx, x, y, w, h, r) {
     ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
     ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
 }
-function drawProtoBars(_d) { }  // replaced by canvas chart
+function drawProtoBars(_d) { }
 
-// â”€â”€ Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function fmtBytes(n) { n = Number(n) || 0; if (n < 1024) return n + " B"; if (n < 1048576) return (n / 1024).toFixed(1) + " K"; if (n < 1073741824) return (n / 1048576).toFixed(2) + " M"; return (n / 1073741824).toFixed(2) + " G"; }
-function fmtNum(n) { n = Number(n) || 0; if (n >= 1e6) return (n / 1e6).toFixed(1) + "M"; if (n >= 1e3) return (n / 1e3).toFixed(1) + "K"; return String(n); }
-function escHtml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+// ── Utilities ─────────────────────────────────────────────────
+function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " K";
+    if (n < 1073741824) return (n / 1048576).toFixed(2) + " M";
+    return (n / 1073741824).toFixed(2) + " G";
+}
+function fmtNum(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+    return String(n);
+}
+function escHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 function setEl(id, val) { const e = document.getElementById(id); if (e) e.textContent = val; }
 function setDot(id, state) { const e = document.getElementById(id); if (e) e.className = "dot dot-" + state; }
-function setBadge(id, text, cls) { const e = document.getElementById(id); if (!e) return; e.textContent = text; e.className = "badge badge-" + cls; }
+function setBadge(id, text, cls) {
+    const e = document.getElementById(id); if (!e) return;
+    e.textContent = text; e.className = "badge badge-" + cls;
+}
 function classifyLog(m) {
-    if (/âœ“|OK|thÃ nh cÃ´ng|WIFI|UP|success/i.test(m)) return "log-ok";
-    if (/âœ—|error|tháº¥t báº¡i|FAIL|failed/i.test(m)) return "log-err";
-    if (/âš |warn|WARNING|STORAGE|modeswitch/i.test(m)) return "log-warn";
-    if (/\[â„¹\]|info|â†’/i.test(m)) return "log-info";
+    if (/OK|thanh cong|WIFI|UP|success/i.test(m)) return "log-ok";
+    if (/error|that bai|FAIL|failed/i.test(m)) return "log-err";
+    if (/warn|WARNING|STORAGE|modeswitch/i.test(m)) return "log-warn";
+    if (/info/i.test(m)) return "log-info";
     return "log-dim";
 }
 function appendLog(boxId, lines, withTime = false) {
@@ -97,9 +114,12 @@ function toast(msg, color = "#58a6ff") {
     clearTimeout(el._t);
     el._t = setTimeout(() => { el.classList.remove("show"); el.classList.add("hidden"); }, 3000);
 }
-function updateClock() { const e = document.getElementById("hdr-time"); if (e) e.textContent = new Date().toLocaleString("vi-VN"); }
+function updateClock() {
+    const e = document.getElementById("hdr-time");
+    if (e) e.textContent = new Date().toLocaleString("vi-VN");
+}
 
-// â”€â”€ Status polling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Status polling ────────────────────────────────────────────
 async function refreshStatus() {
     try {
         const r = await fetch("/api/status"); const d = await r.json();
@@ -110,21 +130,26 @@ async function refreshStatus() {
             if (usb.mode === "wifi") { setBadge("usb-mode-badge", "WiFi 8d80", "wifi"); setDot("dot-usb", "green"); }
             else if (usb.mode === "storage") { setBadge("usb-mode-badge", "Storage 5721", "storage"); setDot("dot-usb", "yellow"); }
             else { setBadge("usb-mode-badge", "Unknown", "none"); setDot("dot-usb", "gray"); }
-        } else { setEl("usb-line", "Not found"); setBadge("usb-mode-badge", "None", "none"); setDot("dot-usb", "red"); }
+        } else {
+            setEl("usb-line", "Not found"); setBadge("usb-mode-badge", "None", "none"); setDot("dot-usb", "red");
+        }
         setDot("dot-mod", d.loaded ? "green" : "red");
-        setEl("lbl-mod", d.loaded ? "Module âœ“" : "Module âœ—");
+        setEl("lbl-mod", d.loaded ? "Module OK" : "Module --");
         const iface = d.iface;
         if (iface.exists) {
-            setEl("if-mac", iface.mac || "â€”"); setEl("if-ip", iface.ip || "â€”");
+            setEl("if-mac", iface.mac || "--"); setEl("if-ip", iface.ip || "--");
             if (iface.up) { setBadge("if-status-badge", "UP", "up"); setDot("dot-iface", "green"); }
             else { setBadge("if-status-badge", "DOWN", "down"); setDot("dot-iface", "yellow"); }
-        } else { setBadge("if-status-badge", "Not found", "none"); setDot("dot-iface", "red"); setEl("if-mac", "â€”"); setEl("if-ip", "â€”"); }
+        } else {
+            setBadge("if-status-badge", "Not found", "none"); setDot("dot-iface", "red");
+            setEl("if-mac", "--"); setEl("if-ip", "--");
+        }
         const p = d.proc;
         if (d.has_proc && Object.keys(p).length) {
-            setEl("s-tx", fmtNum(p["TX tá»•ng"] || p["TX total"] || 0));
-            setEl("s-rx", fmtNum(p["RX tá»•ng"] || p["RX total"] || 0));
+            setEl("s-tx", fmtNum(p["TX tong"] || p["TX total"] || 0));
+            setEl("s-rx", fmtNum(p["RX tong"] || p["RX total"] || 0));
             setEl("s-txb", fmtBytes(p["TX bytes"] || 0));
-            setEl("s-drop", fmtNum(p["TX bá»‹ rá»›t"] || p["TX dropped"] || 0));
+            setEl("s-drop", fmtNum(p["TX bi rot"] || p["TX dropped"] || 0));
             setEl("s-tcp", fmtNum(p["TCP"] || 0));
             setEl("s-udp", fmtNum(p["UDP"] || 0));
             setEl("s-icmp", fmtNum(p["ICMP"] || 0));
@@ -132,19 +157,26 @@ async function refreshStatus() {
             setEl("ss-enc", Number(p["Encrypted"] || 0));
             setEl("ss-tamp", Number(p["Tampered"] || 0));
             setEl("ss-plain", Number(p["Plain"] || 0));
-            _chartData = { TCP: Number(p["TCP"] || 0), UDP: Number(p["UDP"] || 0), ICMP: Number(p["ICMP"] || 0), ARP: Number(p["ARP"] || 0), IPv6: Number(p["IPv6"] || 0), Other: Number(p["KhÃ¡c"] || p["Other"] || 0) };
+            _chartData = {
+                TCP: Number(p["TCP"] || 0),
+                UDP: Number(p["UDP"] || 0),
+                ICMP: Number(p["ICMP"] || 0),
+                ARP: Number(p["ARP"] || 0),
+                IPv6: Number(p["IPv6"] || 0),
+                Other: Number(p["Khac"] || p["Other"] || 0),
+            };
             drawChart(_chartData);
         }
         if (d.has_proc) {
             const raw = Object.entries(p).map(([k, v]) => `  ${k.padEnd(14)}: ${v}`).join("\n");
-            document.getElementById("proc-box").textContent = raw || "â€”";
+            document.getElementById("proc-box").textContent = raw || "--";
         } else {
-            document.getElementById("proc-box").textContent = "Driver chÆ°a load hoáº·c chÆ°a á»Ÿ WiFi mode";
+            document.getElementById("proc-box").textContent = "Driver chua load hoac chua o WiFi mode";
         }
     } catch (e) { console.error("status error", e); }
 }
 
-// â”€â”€ Security Events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Security Events ───────────────────────────────────────────
 async function loadSecEvents() {
     try {
         const r = await fetch("/api/security"); const d = await r.json();
@@ -154,90 +186,99 @@ async function loadSecEvents() {
 }
 
 function renderSecEvents(events, counts) {
-    const okCnt   = counts.ok     || 0;
+    const okCnt = counts.ok || 0;
     const tampCnt = counts.tamper || 0;
     const infoCnt = (counts.info || 0) + (counts.detail || 0);
     const isFallback = events.length > 0 && events[0].fallback;
 
     if (isFallback) {
-        setEl("sec-enc-badge",   "TX: " + events.length);
-        setEl("sec-tamp-badge",  "TAMPER: 0");
+        setEl("sec-enc-badge", "TX: " + events.length);
+        setEl("sec-tamp-badge", "TAMPER: 0");
         setEl("sec-plain-badge", "Driver cu");
         setEl("ss-enc", 0); setEl("ss-tamp", 0); setEl("ss-plain", events.length);
     } else {
-        setEl("sec-enc-badge",   "OK: "      + okCnt);
-        setEl("sec-tamp-badge",  "TAMPER: "  + tampCnt);
-        setEl("sec-plain-badge", "INFO: "    + infoCnt);
+        setEl("sec-enc-badge", "OK: " + okCnt);
+        setEl("sec-tamp-badge", "TAMPER: " + tampCnt);
+        setEl("sec-plain-badge", "INFO: " + infoCnt);
         setEl("ss-enc", okCnt); setEl("ss-tamp", tampCnt); setEl("ss-plain", infoCnt);
     }
 
     const grid = document.getElementById("sec-grid");
     if (!grid) return;
     if (events.length === 0) {
-        grid.innerHTML = '<div class="sec-empty">Chua co su kien - chay Run Demo de xem</div>';
+        grid.innerHTML = '<div class="sec-empty">Chua co su kien -- chay Run Demo de xem</div>';
         return;
     }
 
     const banner = isFallback
-        ? '<div class="sec-event sec-event-plain" style="cursor:default;margin-bottom:6px"><div class="sec-icon">!</div><div class="sec-body"><div class="sec-title sec-title-plain">Driver chua co crypto - hien thi TX log</div><div class="sec-hex">Chay Compile roi Restart de load driver moi co HMAC verify</div></div></div>'
+        ? `<div class="sec-event sec-event-plain" style="cursor:default;margin-bottom:6px">
+               <div class="sec-icon">&#9888;</div>
+               <div class="sec-body">
+                   <div class="sec-title sec-title-plain">Driver chua co crypto -- hien thi TX log</div>
+                   <div class="sec-hex">Chay Compile -&gt; Restart de load driver moi co HMAC verify</div>
+               </div>
+           </div>`
         : "";
 
     const show = [...events].reverse().slice(0, isFallback ? 8 : 12);
     grid.innerHTML = banner + show.map((ev, idx) => {
         const realIdx = events.length - 1 - idx;
-        const isTamp = ev.kind === "tamper", isOk = ev.kind === "ok";
-        const cls   = isTamp ? "sec-event-fail" : isOk ? "sec-event-ok" : "sec-event-plain";
-        const icon  = isTamp ? "!" : isOk ? "#" : "~";
-        const tcls  = isTamp ? "sec-title-fail" : isOk ? "sec-title-ok" : "sec-title-plain";
+        const isTamp = ev.kind === "tamper";
+        const isOk = ev.kind === "ok";
+        const cls = isTamp ? "sec-event-fail" : isOk ? "sec-event-ok" : "sec-event-plain";
+        const icon = isTamp ? "&#128680;" : isOk ? "&#128272;" : "&#8505;";
+        const tcls = isTamp ? "sec-title-fail" : isOk ? "sec-title-ok" : "sec-title-plain";
         const title = isFallback
             ? (ev.msg.includes("TCP") ? "TCP packet"
-               : ev.msg.includes("DNS") || ev.msg.includes("UDP") ? "UDP/DNS packet"
-               : ev.msg.includes("ICMP") ? "ICMP packet"
-               : ev.msg.includes("ARP") ? "ARP packet" : "TX packet")
-            : (isTamp ? "HMAC FAIL - Goi bi TAMPER" : isOk ? "HMAC OK - Goi hop le" : "Crypto Info");
-        const short   = ev.msg.length > 80 ? ev.msg.slice(0, 80) + "..." : ev.msg;
-        const hexPart = ev.hex ? '<div class="sec-hex" style="margin-top:3px;opacity:.75">' + escHtml(ev.hex) + '</div>' : "";
-        const clickAttr = !isFallback ? 'onclick="openSecModal(' + realIdx + ')" title="Click de xem chi tiet"' : "";
-        const cursorStyle = isFallback ? "cursor:default" : "";
-        return '<div class="sec-event ' + cls + '" ' + clickAttr + ' style="' + cursorStyle + '">'
-            + '<div class="sec-icon">' + icon + '</div>'
-            + '<div class="sec-body">'
-            + '<div class="sec-title ' + tcls + '">' + title + '</div>'
-            + '<div class="sec-hex">' + escHtml(short) + '</div>'
-            + hexPart
-            + '</div>'
-            + '<div class="sec-meta">' + (ev.ts ? ev.ts + "s" : "") + '</div>'
-            + '</div>';
+                : ev.msg.includes("DNS") || ev.msg.includes("UDP") ? "UDP/DNS packet"
+                    : ev.msg.includes("ICMP") ? "ICMP packet"
+                        : ev.msg.includes("ARP") ? "ARP packet" : "TX packet")
+            : (isTamp ? "HMAC FAIL -- Goi bi TAMPER" : isOk ? "HMAC OK -- Goi hop le" : "Crypto Info");
+        const short = ev.msg.length > 80 ? ev.msg.slice(0, 80) + "..." : ev.msg;
+        const hexPart = ev.hex
+            ? `<div class="sec-hex" style="margin-top:3px;opacity:.75">${escHtml(ev.hex)}</div>`
+            : "";
+        const clickAttr = !isFallback
+            ? `onclick="openSecModal(${realIdx})" title="Click de xem chi tiet"`
+            : "";
+        return `<div class="sec-event ${cls}" ${clickAttr} style="${isFallback ? "cursor:default" : ""}">
+            <div class="sec-icon">${icon}</div>
+            <div class="sec-body">
+                <div class="sec-title ${tcls}">${title}</div>
+                <div class="sec-hex">${escHtml(short)}</div>
+                ${hexPart}
+            </div>
+            <div class="sec-meta">${ev.ts ? ev.ts + "s" : ""}</div>
+        </div>`;
     }).join("");
 }
-
 
 function openSecModal(idx) {
     const ev = _secEvents[idx]; if (!ev) return;
     const isTamp = ev.kind === "tamper", isOk = ev.kind === "ok";
-    const icon = isTamp ? "ðŸš¨" : isOk ? "ðŸ”" : "â„¹";
-    const title = isTamp ? "HMAC FAIL â€” GÃ³i bá»‹ TAMPER" : isOk ? "HMAC OK â€” GÃ³i há»£p lá»‡" : "Crypto Info";
+    const icon = isTamp ? "&#128680;" : isOk ? "&#128272;" : "&#8505;";
+    const title = isTamp ? "HMAC FAIL -- Goi bi TAMPER" : isOk ? "HMAC OK -- Goi hop le" : "Crypto Info";
     const fcls = isTamp ? "fail" : isOk ? "ok" : "info";
     const explain = isTamp
-        ? `<b style="color:var(--red)">PhÃ¡t hiá»‡n gÃ³i bá»‹ giáº£ máº¡o!</b><br>
-          Driver tÃ­nh láº¡i HMAC-SHA256 trÃªn ciphertext vÃ  so sÃ¡nh vá»›i tag 8 byte cuá»‘i payload.<br>
-          Káº¿t quáº£: <b>KHÃ”NG KHá»šP</b> â†’ gÃ³i Ä‘Ã£ bá»‹ sá»­a Ä‘á»•i trong quÃ¡ trÃ¬nh truyá»n.`
+        ? `<b style="color:var(--red)">Phat hien goi bi gia mao!</b><br>
+           Driver tinh lai HMAC-SHA256 tren ciphertext va so sanh voi tag 8 byte cuoi payload.<br>
+           Ket qua: <b>KHONG KHOP</b> &#8594; goi da bi sua doi trong qua trinh truyen.`
         : isOk
-            ? `<b style="color:var(--green)">GÃ³i tin há»£p lá»‡.</b><br>
-          HMAC-SHA256 verify thÃ nh cÃ´ng. Driver Ä‘Ã£:<br>
-          1. TÃ­nh HMAC(key, ciphertext)<br>
-          2. So sÃ¡nh vá»›i tag 8 byte cuá»‘i payload<br>
-          3. Káº¿t quáº£: <b>KHá»šP</b> â†’ gÃ³i toÃ n váº¹n, chÆ°a bá»‹ sá»­a Ä‘á»•i.`
-            : `ThÃ´ng tin chi tiáº¿t vá» quÃ¡ trÃ¬nh mÃ£ hÃ³a/giáº£i mÃ£.`;
+            ? `<b style="color:var(--green)">Goi tin hop le.</b><br>
+           HMAC-SHA256 verify thanh cong. Driver da:<br>
+           1. Tinh HMAC(key, ciphertext)<br>
+           2. So sanh voi tag 8 byte cuoi payload<br>
+           3. Ket qua: <b>KHOP</b> &#8594; goi toan ven, chua bi sua doi.`
+            : `Thong tin chi tiet ve qua trinh ma hoa/giai ma.`;
 
     document.getElementById("modal-title").innerHTML = `${icon} ${title}`;
     document.getElementById("modal-body").innerHTML = `
         <div class="modal-section">
-            <div class="modal-section-title">Giáº£i thÃ­ch</div>
+            <div class="modal-section-title">Giai thich</div>
             <div class="modal-field ${fcls}" style="font-family:var(--font-sans);font-size:12px;line-height:1.8">${explain}</div>
         </div>
         <div class="modal-section">
-            <div class="modal-section-title">ThÃ´ng Ä‘iá»‡p tá»« driver</div>
+            <div class="modal-section-title">Thong diep tu driver</div>
             <div class="modal-field ${fcls}">${escHtml(ev.msg)}</div>
         </div>
         ${ev.hex ? `
@@ -246,7 +287,7 @@ function openSecModal(idx) {
             <div class="modal-field">
                 <span class="modal-hex">${escHtml(ev.hex)}</span>
                 <div style="margin-top:6px;font-size:10px;color:var(--text-secondary)">
-                    Dá»¯ liá»‡u sau XOR encrypt (key=0xA1) + HMAC-SHA256 tag 8 bytes cuá»‘i
+                    Du lieu sau XOR encrypt (key=0xA1) + HMAC-SHA256 tag 8 bytes cuoi
                 </div>
             </div>
         </div>`: ""}
@@ -255,15 +296,15 @@ function openSecModal(idx) {
             <div class="modal-raw">${escHtml(ev.raw)}</div>
         </div>
         <div class="modal-section">
-            <div class="modal-section-title">Luá»“ng xá»­ lÃ½</div>
+            <div class="modal-section-title">Luong xu ly</div>
             <div class="modal-field info" style="font-family:var(--font-sans);font-size:11px;line-height:1.9;color:var(--text-secondary)">
-                demo.c â†’ XOR(payload, key=0xA1) â†’ append HMAC[8]<br>
-                â†’ AF_PACKET sendto() â†’ kernel dev_queue_xmit()<br>
-                â†’ <b style="color:var(--cyan)">aicsemi_net_xmit()</b> â†’ aic_verify_hmac()<br>
-                â†’ ${isTamp
-            ? '<b style="color:var(--red)">HMAC mismatch â†’ tx_tampered++ â†’ log [SECURITY]</b>'
+                demo.c &#8594; XOR(payload, key=0xA1) &#8594; append HMAC[8]<br>
+                &#8594; AF_PACKET sendto() &#8594; kernel dev_queue_xmit()<br>
+                &#8594; <b style="color:var(--cyan)">aicsemi_net_xmit()</b> &#8594; aic_verify_hmac()<br>
+                &#8594; ${isTamp
+            ? '<b style="color:var(--red)">HMAC mismatch &#8594; tx_tampered++ &#8594; log [SECURITY]</b>'
             : isOk
-                ? '<b style="color:var(--green)">HMAC match â†’ tx_encrypted++ â†’ aic_xor_decrypt() â†’ log plaintext</b>'
+                ? '<b style="color:var(--green)">HMAC match &#8594; tx_encrypted++ &#8594; aic_xor_decrypt() &#8594; log plaintext</b>'
                 : 'log crypto info'}
             </div>
         </div>`;
@@ -278,7 +319,7 @@ function closeModal(e) {
 }
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
-// â”€â”€ dmesg â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── dmesg ─────────────────────────────────────────────────────
 async function loadDmesg() {
     const box = document.getElementById("dmesg-box"); box.innerHTML = "";
     try {
@@ -287,7 +328,7 @@ async function loadDmesg() {
     } catch (e) { box.textContent = "Error loading dmesg"; }
 }
 
-// â”€â”€ Action log polling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Action log polling ────────────────────────────────────────
 let _lastLogLen = 0;
 async function pollLog() {
     try {
@@ -304,7 +345,7 @@ async function clearLog() {
     _lastLogLen = 0;
 }
 
-// â”€â”€ Driver Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Driver Actions ────────────────────────────────────────────
 const ACTION_LABELS = {
     compile: "Compiling...", setup: "Running setup.bash...",
     restart: "Restarting driver...", modeswitch: "Forcing modeswitch...",
@@ -312,27 +353,26 @@ const ACTION_LABELS = {
 };
 async function doAction(name) {
     const btn = event.currentTarget; const orig = btn.textContent;
-    btn.disabled = true; btn.innerHTML = `<span class="spin">âŸ³</span> ${ACTION_LABELS[name] || name}`;
+    btn.disabled = true; btn.innerHTML = `<span class="spin">&#8635;</span> ${ACTION_LABELS[name] || name}`;
     toast(ACTION_LABELS[name] || name, "#58a6ff");
     try {
         const r = await fetch(`/api/action/${name}`, { method: "POST" }); const d = await r.json();
-        if (d.ok) toast(`âœ“ ${name} OK`, "#3fb950");
-        else toast(`âœ— ${name} failed: ${d.stderr || ""}`, "#f85149");
+        if (d.ok) toast(`OK: ${name}`, "#3fb950");
+        else toast(`FAIL: ${name} -- ${d.stderr || ""}`, "#f85149");
         await refreshAll();
-        // Sau demo, load security events ngay
         if (name === "demo") await loadSecEvents();
-    } catch (e) { toast("âœ— Network error", "#f85149"); }
+    } catch (e) { toast("Network error", "#f85149"); }
     finally { btn.disabled = false; btn.textContent = orig; }
 }
 
-// â”€â”€ Interface UP/DOWN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Interface UP/DOWN ─────────────────────────────────────────
 async function ifUp() {
     const iface = document.getElementById("if-name").textContent.trim() || "aic0";
     const ip = document.getElementById("inp-ip").value.trim() || "192.168.99.1/24";
     toast(`Setting ${iface} UP...`, "#58a6ff");
     const r = await fetch("/api/action/ifup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ iface, ip }) });
     const d = await r.json();
-    toast(d.ok ? `âœ“ ${iface} UP â€” ${ip}` : `âœ— ${d.link?.stderr || "failed"}`, d.ok ? "#3fb950" : "#f85149");
+    toast(d.ok ? `${iface} UP -- ${ip}` : `FAIL: ${d.link?.stderr || "failed"}`, d.ok ? "#3fb950" : "#f85149");
     await refreshStatus();
 }
 async function ifDown() {
@@ -340,26 +380,29 @@ async function ifDown() {
     toast(`Setting ${iface} DOWN...`, "#d29922");
     const r = await fetch("/api/action/ifdown", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ iface }) });
     const d = await r.json();
-    toast(d.ok ? `âœ“ ${iface} DOWN` : "âœ— failed", d.ok ? "#3fb950" : "#f85149");
+    toast(d.ok ? `${iface} DOWN` : "FAIL", d.ok ? "#3fb950" : "#f85149");
     await refreshStatus();
 }
 
-// â”€â”€ Ping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Ping ──────────────────────────────────────────────────────
 async function doPing() {
     const ip = document.getElementById("ping-ip").value.trim();
     const iface = document.getElementById("ping-iface").value.trim() || "aic0";
     const count = document.getElementById("ping-count").value;
     const box = document.getElementById("ping-result");
-    if (!ip) { toast("Nháº­p IP trÆ°á»›c", "#f85149"); return; }
-    box.className = "ping-result"; box.textContent = `Pinging ${ip} via ${iface} (${count} packets)...`;
+    if (!ip) { toast("Nhap IP truoc", "#f85149"); return; }
+    box.className = "ping-result";
+    box.textContent = `Pinging ${ip} via ${iface} (${count} packets)...`;
     box.classList.remove("hidden");
     const r = await fetch("/api/action/ping", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ip, iface, count: Number(count) }) });
     const d = await r.json();
     box.className = "ping-result " + (d.ok ? "ping-ok" : "ping-fail");
-    box.textContent = d.ok ? `âœ“ ${ip} reachable\n  Loss: ${d.loss}  RTT avg: ${d.rtt_avg}\n\n${d.stdout}` : `âœ— ${ip} unreachable\n  Loss: ${d.loss}\n\n${d.stdout || d.stderr || ""}`;
+    box.textContent = d.ok
+        ? `OK: ${ip} reachable\n  Loss: ${d.loss}  RTT avg: ${d.rtt_avg}\n\n${d.stdout}`
+        : `FAIL: ${ip} unreachable\n  Loss: ${d.loss}\n\n${d.stdout || d.stderr || ""}`;
 }
 
-// â”€â”€ Init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Init ──────────────────────────────────────────────────────
 window.addEventListener("resize", () => drawChart(_chartData));
 
 async function refreshAll() {
@@ -374,5 +417,5 @@ async function refreshAll() {
     setInterval(refreshStatus, 3000);
     setInterval(pollLog, 1500);
     setInterval(loadDmesg, 10000);
-    setInterval(loadSecEvents, 5000);  // poll security events má»—i 5s
+    setInterval(loadSecEvents, 5000);
 })();
