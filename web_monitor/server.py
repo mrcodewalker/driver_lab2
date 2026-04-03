@@ -123,58 +123,66 @@ def get_dmesg_tail(n=30):
 
 def get_security_events(n=60):
     """
-    Lấy security events từ dmesg.
-    - Nếu driver mới (có crypto): lọc HMAC/CRYPTO/SECURITY
-    - Nếu driver cũ (chưa có crypto): fallback hiển thị tất cả TX log
+    Parse security events tu dmesg.
+    - Gom cac dong phu (Ciphertext hex, plaintext) vao event chinh truoc do
+      de tranh dem 1 goi TAMPER thanh 2 event.
+    - Fallback: neu driver cu, hien thi TX log.
     """
     r = run_cmd(["dmesg"])
     all_aic = [l for l in r["stdout"].splitlines() if "aicsemi" in l]
     events  = []
 
-    # Thử lọc crypto events trước
     crypto_keywords = ["hmac", "crypto", "security", "tamper", "encrypt", "plain", "cipher", "xor"]
-    for line in all_aic:
-        lo = line.lower()
-        if not any(k in lo for k in crypto_keywords):
-            continue
-        if "hmac fail" in lo or "tamper" in lo or "security" in lo:
-            kind = "tamper"
-        elif "hmac ok" in lo or "hợp lệ" in lo:
-            kind = "ok"
-        elif "plaintext" in lo or "ciphertext" in lo:
-            kind = "detail"
-        else:
-            kind = "info"
-        ts_m  = re.search(r"\[\s*(\d+\.\d+)\]", line)
-        hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
-        msg   = re.sub(r"^\[.*?\]\s*", "", line)
-        msg   = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE).strip()
-        events.append({
-            "kind": kind, "ts": ts_m.group(1) if ts_m else "",
-            "msg": msg, "hex": hex_m[0] if hex_m else "", "raw": line,
-        })
+    raw_crypto = [l for l in all_aic if any(k in l.lower() for k in crypto_keywords)]
 
-    # Fallback: driver chưa có crypto → hiển thị TX/RX log thông thường
-    if not events:
-        tx_lines = [l for l in all_aic if "TX #" in l or "RX" in l or "NDO" in l or "probe" in l.lower()]
+    if raw_crypto:
+        for line in raw_crypto:
+            lo   = line.lower()
+            ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
+            hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
+            msg  = re.sub(r"^\[.*?\]\s*", "", line)
+            msg  = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE).strip()
+
+            # Dong phu: Ciphertext hex hoac plaintext preview
+            # -> gan vao event truoc, KHONG tao event moi
+            is_sub = ("ciphertext" in lo or "plaintext" in lo) and "tx #" not in lo
+            if is_sub and events:
+                if hex_m and not events[-1]["hex"]:
+                    events[-1]["hex"] = hex_m[0]
+                events[-1]["raw"] += " | " + msg
+                continue
+
+            # Dong chinh: xac dinh loai
+            if ("hmac fail" in lo) or ("security" in lo and "tx #" in lo):
+                kind = "tamper"
+            elif "hmac ok" in lo and "tx #" in lo:
+                kind = "ok"
+            else:
+                kind = "info"
+
+            events.append({
+                "kind": kind,
+                "ts":   ts_m.group(1) if ts_m else "",
+                "msg":  msg,
+                "hex":  hex_m[0] if hex_m else "",
+                "raw":  line,
+            })
+    else:
+        # Fallback: driver cu
+        tx_lines = [l for l in all_aic if "TX #" in l or "NDO" in l]
         for line in tx_lines[-n:]:
             ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
             msg  = re.sub(r"^\[.*?\]\s*", "", line)
             msg  = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE).strip()
-            # Phân loại TX log
-            lo = line.lower()
-            if "tcp" in lo:   kind = "ok"
-            elif "udp" in lo or "dns" in lo: kind = "info"
-            elif "icmp" in lo: kind = "info"
-            elif "arp" in lo:  kind = "detail"
-            else:              kind = "info"
+            lo   = line.lower()
+            kind = "ok" if "tcp" in lo else "info"
             events.append({
                 "kind": kind, "ts": ts_m.group(1) if ts_m else "",
-                "msg": msg, "hex": "", "raw": line,
-                "fallback": True,   # đánh dấu là fallback (driver cũ)
+                "msg": msg, "hex": "", "raw": line, "fallback": True,
             })
 
     return events[-n:]
+
 
 # ── API Routes ───────────────────────────────────────────────────
 
