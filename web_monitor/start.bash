@@ -35,6 +35,34 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# ── Compile driver nếu cần ─────────────────────────────────────
+DRIVER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+KO_FILE="${DRIVER_DIR}/usb.ko"
+SRC_FILE="${DRIVER_DIR}/usb.c"
+
+echo ""
+info "Kiểm tra driver..."
+NEED_COMPILE=0
+if [ ! -f "$KO_FILE" ]; then
+    warn "usb.ko chưa có — cần compile"
+    NEED_COMPILE=1
+elif [ -f "$SRC_FILE" ] && [ "$SRC_FILE" -nt "$KO_FILE" ]; then
+    warn "usb.c mới hơn usb.ko — cần compile lại (có thay đổi crypto)"
+    NEED_COMPILE=1
+else
+    ok "usb.ko đã up-to-date ($(du -h "$KO_FILE" | cut -f1))"
+fi
+
+if [ "$NEED_COMPILE" -eq 1 ]; then
+    info "Đang compile usb.c → usb.ko ..."
+    if bash "${DRIVER_DIR}/compile.bash"; then
+        ok "Compile thành công"
+    else
+        err "Compile thất bại! Kiểm tra lỗi ở trên."
+        exit 1
+    fi
+fi
+
 # ── Kill server cũ nếu đang chạy ──────────────────────────────
 if [ -f "$PID_FILE" ]; then
     OLD_PID=$(cat "$PID_FILE" 2>/dev/null || true)

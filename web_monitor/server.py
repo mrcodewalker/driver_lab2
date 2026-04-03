@@ -97,17 +97,21 @@ def get_dmesg_tail(n=30):
     return lines[-n:]
 
 def get_security_events(n=60):
-    """Lấy các dòng dmesg liên quan crypto/security, parse thành structured events"""
+    """
+    Lấy security events từ dmesg.
+    - Nếu driver mới (có crypto): lọc HMAC/CRYPTO/SECURITY
+    - Nếu driver cũ (chưa có crypto): fallback hiển thị tất cả TX log
+    """
     r = run_cmd(["dmesg"])
-    events = []
-    for line in r["stdout"].splitlines():
-        if "aicsemi" not in line:
-            continue
+    all_aic = [l for l in r["stdout"].splitlines() if "aicsemi" in l]
+    events  = []
+
+    # Thử lọc crypto events trước
+    crypto_keywords = ["hmac", "crypto", "security", "tamper", "encrypt", "plain", "cipher", "xor"]
+    for line in all_aic:
         lo = line.lower()
-        if not any(k in lo for k in ["hmac", "crypto", "security", "tamper",
-                                      "encrypt", "plain", "cipher", "xor"]):
+        if not any(k in lo for k in crypto_keywords):
             continue
-        # Xác định loại event
         if "hmac fail" in lo or "tamper" in lo or "security" in lo:
             kind = "tamper"
         elif "hmac ok" in lo or "hợp lệ" in lo:
@@ -116,26 +120,35 @@ def get_security_events(n=60):
             kind = "detail"
         else:
             kind = "info"
-
-        # Extract timestamp
-        ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
-        ts   = ts_m.group(1) if ts_m else ""
-
-        # Extract hex bytes nếu có
+        ts_m  = re.search(r"\[\s*(\d+\.\d+)\]", line)
         hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
-        hex_str = hex_m[0] if hex_m else ""
-
-        # Clean message
-        msg = re.sub(r"^\[.*?\]\s*", "", line)
-        msg = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE)
-
+        msg   = re.sub(r"^\[.*?\]\s*", "", line)
+        msg   = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE).strip()
         events.append({
-            "kind":    kind,
-            "ts":      ts,
-            "msg":     msg.strip(),
-            "hex":     hex_str,
-            "raw":     line,
+            "kind": kind, "ts": ts_m.group(1) if ts_m else "",
+            "msg": msg, "hex": hex_m[0] if hex_m else "", "raw": line,
         })
+
+    # Fallback: driver chưa có crypto → hiển thị TX/RX log thông thường
+    if not events:
+        tx_lines = [l for l in all_aic if "TX #" in l or "RX" in l or "NDO" in l or "probe" in l.lower()]
+        for line in tx_lines[-n:]:
+            ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
+            msg  = re.sub(r"^\[.*?\]\s*", "", line)
+            msg  = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE).strip()
+            # Phân loại TX log
+            lo = line.lower()
+            if "tcp" in lo:   kind = "ok"
+            elif "udp" in lo or "dns" in lo: kind = "info"
+            elif "icmp" in lo: kind = "info"
+            elif "arp" in lo:  kind = "detail"
+            else:              kind = "info"
+            events.append({
+                "kind": kind, "ts": ts_m.group(1) if ts_m else "",
+                "msg": msg, "hex": "", "raw": line,
+                "fallback": True,   # đánh dấu là fallback (driver cũ)
+            })
+
     return events[-n:]
 
 # ── API Routes ───────────────────────────────────────────────────
