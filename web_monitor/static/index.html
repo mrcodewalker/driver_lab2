@@ -151,6 +151,22 @@
                 <canvas id="proto-chart"></canvas>
             </div>
 
+            <!-- Security Events — TRÊN dmesg -->
+            <div class="card">
+                <div class="card-title-row">
+                    <span class="card-title">🔐 Security Events</span>
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <span class="badge badge-wifi" id="sec-enc-badge">ENC: 0</span>
+                        <span class="badge badge-none" id="sec-tamp-badge">TAMPER: 0</span>
+                        <span class="badge badge-storage" id="sec-plain-badge">INFO: 0</span>
+                        <button class="btn btn-xs btn-gray" onclick="loadSecEvents()">⟳</button>
+                    </div>
+                </div>
+                <div class="sec-grid" id="sec-grid">
+                    <div class="sec-empty">Chưa có sự kiện — chạy demo để xem</div>
+                </div>
+            </div>
+
             <!-- dmesg Log -->
             <div class="card card-grow">
                 <div class="card-title-row">
@@ -158,21 +174,6 @@
                     <button class="btn btn-xs btn-gray" onclick="loadDmesg()">⟳</button>
                 </div>
                 <div class="log-box" id="dmesg-box"></div>
-            </div>
-
-            <!-- Security Events -->
-            <div class="card">
-                <div class="card-title-row">
-                    <span class="card-title">🔐 Security Events</span>
-                    <div style="display:flex;gap:6px;align-items:center">
-                        <span class="badge badge-wifi" id="sec-enc-badge">ENC: 0</span>
-                        <span class="badge badge-none" id="sec-tamp-badge">TAMPER: 0</span>
-                        <span class="badge badge-storage" id="sec-plain-badge">PLAIN: 0</span>
-                    </div>
-                </div>
-                <div class="sec-grid" id="sec-grid">
-                    <div class="sec-empty">Chưa có sự kiện — chạy demo để xem</div>
-                </div>
             </div>
 
         </section>
@@ -200,6 +201,17 @@
 
     <!-- Toast -->
     <div id="toast" class="toast hidden"></div>
+
+    <!-- Security Event Detail Modal -->
+    <div id="sec-modal" class="modal-overlay hidden" onclick="closeModal(event)">
+        <div class="modal-box">
+            <div class="modal-header">
+                <div class="modal-title" id="modal-title">Security Event Detail</div>
+                <button class="modal-close" onclick="closeModal()">✕</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
 
     <script src="/static/app.js"></script>
 </body>

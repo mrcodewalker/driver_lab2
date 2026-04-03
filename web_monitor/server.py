@@ -96,6 +96,48 @@ def get_dmesg_tail(n=30):
     lines = [l for l in r["stdout"].splitlines() if "aicsemi" in l]
     return lines[-n:]
 
+def get_security_events(n=60):
+    """Lấy các dòng dmesg liên quan crypto/security, parse thành structured events"""
+    r = run_cmd(["dmesg"])
+    events = []
+    for line in r["stdout"].splitlines():
+        if "aicsemi" not in line:
+            continue
+        lo = line.lower()
+        if not any(k in lo for k in ["hmac", "crypto", "security", "tamper",
+                                      "encrypt", "plain", "cipher", "xor"]):
+            continue
+        # Xác định loại event
+        if "hmac fail" in lo or "tamper" in lo or "security" in lo:
+            kind = "tamper"
+        elif "hmac ok" in lo or "hợp lệ" in lo:
+            kind = "ok"
+        elif "plaintext" in lo or "ciphertext" in lo:
+            kind = "detail"
+        else:
+            kind = "info"
+
+        # Extract timestamp
+        ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
+        ts   = ts_m.group(1) if ts_m else ""
+
+        # Extract hex bytes nếu có
+        hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
+        hex_str = hex_m[0] if hex_m else ""
+
+        # Clean message
+        msg = re.sub(r"^\[.*?\]\s*", "", line)
+        msg = re.sub(r"\[aicsemi\]\s*", "", msg, flags=re.IGNORECASE)
+
+        events.append({
+            "kind":    kind,
+            "ts":      ts,
+            "msg":     msg.strip(),
+            "hex":     hex_str,
+            "raw":     line,
+        })
+    return events[-n:]
+
 # ── API Routes ───────────────────────────────────────────────────
 
 @app.route("/")
@@ -127,6 +169,15 @@ def api_status():
 def api_dmesg():
     n = int(request.args.get("n", 40))
     return jsonify({"lines": get_dmesg_tail(n)})
+
+@app.route("/api/security")
+def api_security():
+    events = get_security_events(80)
+    # Tổng hợp counts
+    counts = {"ok": 0, "tamper": 0, "info": 0, "detail": 0}
+    for e in events:
+        counts[e["kind"]] = counts.get(e["kind"], 0) + 1
+    return jsonify({"events": events, "counts": counts})
 
 @app.route("/api/log")
 def api_log():
