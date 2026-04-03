@@ -365,7 +365,7 @@ async function doAction(name) {
         if (d.ok) toast(`OK: ${name}`, "#3fb950");
         else toast(`FAIL: ${name} -- ${d.stderr || ""}`, "#f85149");
         await refreshAll();
-        if (name === "demo") await loadSecEvents();
+        if (name === "demo") { await loadSecEvents(); await loadPacketLog(); }
     } catch (e) { toast("Network error", "#f85149"); }
     finally { btn.disabled = false; btn.textContent = orig; }
 }
@@ -389,6 +389,245 @@ async function ifDown() {
     await refreshStatus();
 }
 
+// ── Crypto Ping ───────────────────────────────────────────────
+async function doCryptoPing() {
+    const iface = document.getElementById("cpng-iface").value.trim() || "aic0";
+    const box = document.getElementById("cpng-result");
+    box.className = "cpng-result";
+    box.innerHTML = `<div class="cpng-header ok">&#9203; Running crypto ping on ${iface}...</div>`;
+    box.classList.remove("hidden");
+
+    try {
+        const r = await fetch("/api/action/crypto_ping", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ iface }),
+        });
+        const d = await r.json();
+
+        const okCnt = d.count_ok || 0;
+        const tampCnt = d.count_tamper || 0;
+        const allOk = tampCnt === 0 && okCnt > 0;
+
+        const headerCls = allOk ? "ok" : "fail";
+        const headerTxt = allOk
+            ? `&#10003; ${okCnt} packets OK -- HMAC verified`
+            : `&#9888; ${okCnt} OK / ${tampCnt} TAMPERED`;
+
+        const rows = (d.results || []).map(x => {
+            const isOk = x.status === "ok";
+            const icon = isOk ? "&#128272;" : "&#128680;";
+            const lbl = isOk ? "HMAC OK" : "HMAC FAIL";
+            const short = x.msg.length > 70 ? x.msg.slice(0, 70) + "..." : x.msg;
+            return `<div class="cpng-row ${isOk ? "ok" : "fail"}">
+                <span class="cpng-icon">${icon}</span>
+                <span style="font-weight:600;min-width:80px">${lbl}</span>
+                <span class="cpng-msg">${escHtml(short)}</span>
+                <span class="cpng-ts">${x.ts}s</span>
+            </div>`;
+        }).join("");
+
+        box.innerHTML = `
+            <div class="cpng-header ${headerCls}">${headerTxt}</div>
+            <div class="cpng-rows">${rows || '<div class="cpng-row"><span class="cpng-msg">No HMAC events in dmesg -- driver may not have crypto support</span></div>'}</div>`;
+
+        // Refresh security events
+        await loadSecEvents();
+        toast(allOk ? "Crypto Ping: all OK" : `Crypto Ping: ${tampCnt} TAMPERED`, allOk ? "#3fb950" : "#f85149");
+    } catch (e) {
+        box.innerHTML = `<div class="cpng-header fail">Network error: ${e.message}</div>`;
+    }
+}
+
+// ── Packet Crypto Log ─────────────────────────────────────────
+let _packets = [];
+
+async function loadPacketLog() {
+    try {
+        const r = await fetch("/api/packet_log");
+        const d = await r.json();
+        _packets = d.packets || [];
+        renderPacketLog(_packets);
+    } catch (e) { console.error("packet log", e); }
+}
+
+function renderPacketLog(pkts) {
+    const box = document.getElementById("pkt-log-table");
+    if (!box) return;
+    if (pkts.length === 0) {
+        box.innerHTML = '<div class="sec-empty">Chua co du lieu -- chay Demo</div>';
+        return;
+    }
+    // Hien thi moi nhat len dau, toi da 30 goi
+    const show = [...pkts].reverse().slice(0, 30);
+    box.innerHTML = show.map((p, idx) => {
+        const realIdx = pkts.length - 1 - idx;
+        const hmacCls = p.hmac === "ok" ? "ok" : p.hmac === "tamper" ? "tamper" : "none";
+        const hmacTxt = p.hmac === "ok" ? "OK" : p.hmac === "tamper" ? "FAIL" : "--";
+        const rowCls = hmacCls;
+
+        // Protocol color
+        const protoLo = (p.proto || "").toLowerCase();
+        const protoCls = protoLo.includes("tcp") ? "tcp"
+            : protoLo.includes("udp") || protoLo.includes("dns") ? "udp"
+                : protoLo.includes("icmp") ? "icmp"
+                    : protoLo.includes("arp") ? "arp" : "other";
+        const protoShort = protoLo.includes("tcp") ? "TCP"
+            : protoLo.includes("dns") ? "DNS"
+                : protoLo.includes("udp") ? "UDP"
+                    : protoLo.includes("icmp") ? "ICMP"
+                        : protoLo.includes("arp") ? "ARP" : "PKT";
+
+        // Info: src->dst or detail
+        const info = p.src_ip && p.dst_ip
+            ? `${p.src_ip} &#8594; ${p.dst_ip}${p.flags ? " [" + p.flags + "]" : ""}`
+            : escHtml((p.raw_lines && p.raw_lines[0]) || "");
+
+        return `<div class="pkt-row ${rowCls}" onclick="openPktModal(${realIdx})" title="Click de xem chi tiet ma hoa/giai ma">
+            <div class="pkt-seq">#${p.seq}</div>
+            <div class="pkt-proto ${protoCls}">${protoShort}</div>
+            <div class="pkt-info">${info}</div>
+            <div class="pkt-bytes">${p.bytes}B</div>
+            <div class="pkt-hmac ${hmacCls}">${hmacTxt}</div>
+        </div>`;
+    }).join("");
+}
+
+function openPktModal(idx) {
+    const p = _packets[idx]; if (!p) return;
+    const isTamp = p.hmac === "tamper";
+    const isOk = p.hmac === "ok";
+    const isNone = p.hmac === "none";
+
+    const protoLo = (p.proto || "").toLowerCase();
+    const hasEncrypt = isOk || isTamp;
+
+    // Title
+    const statusIcon = isTamp ? "&#128680;" : isOk ? "&#128272;" : "&#128228;";
+    const statusTxt = isTamp ? "HMAC FAIL -- TAMPERED"
+        : isOk ? "HMAC OK -- Verified"
+            : "No HMAC (ARP/plain)";
+    document.getElementById("pkt-modal-title").innerHTML =
+        `${statusIcon} #${p.seq} ${p.proto} -- ${statusTxt}`;
+
+    // Build flow steps
+    const steps = [];
+
+    // Step 1: Original data
+    steps.push({
+        num: "1", cls: "blue",
+        title: "Userspace (demo.c) -- Du lieu goc",
+        body: `Goi tin duoc tao trong demo.c voi:<br>
+               Protocol: <b>${escHtml(p.proto)}</b> &nbsp;|&nbsp;
+               Size: <b>${p.bytes} bytes</b><br>
+               ${p.src_ip ? `Src IP: <b>${p.src_ip}</b> &nbsp;&#8594;&nbsp; Dst IP: <b>${p.dst_ip}</b><br>` : ""}
+               ${p.flags ? `TCP Flags: <b>${escHtml(p.flags)}</b><br>` : ""}
+               ${p.src_mac ? `Src MAC: <code>${p.src_mac}</code>` : ""}`,
+    });
+
+    // Step 2: Encrypt (only for IP packets)
+    if (!protoLo.includes("arp")) {
+        steps.push({
+            num: "2", cls: "blue",
+            title: "Ma hoa payload -- XOR cipher (key=0xA1)",
+            body: `Payload duoc XOR voi key <b>0xA1</b> byte-by-byte:<br>
+                   <code>ciphertext[i] = plaintext[i] XOR 0xA1</code><br><br>
+                   Vi du: chu 'A' (0x41) &#8594; 0x41 XOR 0xA1 = <b>0xE0</b><br>
+                   Toan bo payload duoc ma hoa truoc khi gui.`,
+            hex: p.cipher_hex || "",
+        });
+
+        // Step 3: HMAC
+        steps.push({
+            num: "3", cls: "blue",
+            title: "Tinh HMAC-SHA256 (truncated 8 bytes)",
+            body: `HMAC = SHA256( (key XOR opad) || SHA256( (key XOR ipad) || ciphertext ) )<br>
+                   Key: <code>A1 C5 E1 1B 5B 4D 3C 1D E4 0D E5 16 4E 0A 1F 2B</code><br>
+                   Lay 8 byte dau cua HMAC-SHA256 lam tag, append vao cuoi payload.<br>
+                   <b>Cau truc goi cuoi: [ ETH | IP | L4 | XOR(payload) | HMAC[8] ]</b>`,
+        });
+    } else {
+        steps.push({
+            num: "2", cls: "yellow",
+            title: "ARP -- Khong co payload de ma hoa",
+            body: `ARP packet chi co header (28 bytes), khong co application payload.<br>
+                   Driver khong verify HMAC cho ARP -- day la hanh vi binh thuong.<br>
+                   Counter: <b>tx_plain++</b>`,
+        });
+    }
+
+    // Step 4: Kernel verify
+    if (hasEncrypt) {
+        steps.push({
+            num: "4", cls: isOk ? "green" : "red",
+            title: isOk ? "Kernel driver -- HMAC verify THANH CONG" : "Kernel driver -- HMAC verify THAT BAI",
+            body: isOk
+                ? `Driver (aicsemi_net_xmit) nhan skb, tim payload sau L4 header.<br>
+                   Goi <b>aic_verify_hmac(payload, len)</b>:<br>
+                   1. Tinh lai HMAC tren phan ciphertext (bo 8 byte tag cuoi)<br>
+                   2. So sanh voi tag: <b>KHOP</b> &#8594; goi hop le<br>
+                   3. Goi <b>aic_xor_decrypt()</b> de lay plaintext preview<br>
+                   4. <b>tx_encrypted++</b>, log [CRYPTO] HMAC OK`
+                : `Driver nhan skb, tinh lai HMAC tren ciphertext.<br>
+                   So sanh voi tag 8 byte cuoi: <b>KHONG KHOP</b><br>
+                   Nguyen nhan: goi bi sua doi sau khi ma hoa (man-in-the-middle).<br>
+                   <b>tx_tampered++</b>, log [SECURITY] HMAC FAIL`,
+            hex: p.plain_hex || "",
+            hexLabel: isOk ? "Plaintext preview (sau XOR decrypt):" : "Ciphertext bi tamper:",
+        });
+    }
+
+    // Step 5: Ring buffer
+    steps.push({
+        num: hasEncrypt ? "5" : "3", cls: "blue",
+        title: "Ring buffer -- Luu metadata vao kernel",
+        body: `ring_push() luu entry vao ring buffer 1024 slots (lock-free atomic):<br>
+               ts_ns, seq, len, eth_proto, ip_proto, direction='T'<br>
+               saddr, daddr, sport, dport, tcp_flags<br>
+               <b>encrypted=${hasEncrypt ? 1 : 0}, hmac_ok=${isOk ? 1 : 0}</b><br>
+               monitor.c doc qua ioctl GETRING de hien thi realtime.`,
+    });
+
+    // Render
+    const stepsHtml = steps.map(s => `
+        <div class="pkt-flow-step">
+            <div class="pkt-flow-num ${s.cls}">${s.num}</div>
+            <div class="pkt-flow-content">
+                <div class="pkt-flow-title">${s.title}</div>
+                <div class="pkt-flow-body">${s.body}</div>
+                ${s.hex ? `<div style="margin-top:4px;font-size:10px;color:var(--text-secondary)">${s.hexLabel || "Hex:"}</div>
+                           <div class="pkt-hex-block">${escHtml(s.hex)}</div>` : ""}
+            </div>
+        </div>`).join("");
+
+    // Raw dmesg lines
+    const rawHtml = (p.raw_lines || []).map(l =>
+        `<div style="padding:2px 0;border-bottom:1px solid var(--border-dim);color:var(--text-secondary)">${escHtml(l)}</div>`
+    ).join("");
+
+    document.getElementById("pkt-modal-body").innerHTML = `
+        <div class="modal-section">
+            <div class="modal-section-title">Luong xu ly chi tiet</div>
+            <div class="pkt-detail-flow">${stepsHtml}</div>
+        </div>
+        <div class="modal-section">
+            <div class="modal-section-title">Raw dmesg lines</div>
+            <div class="modal-field info" style="padding:8px 10px">${rawHtml || "<span style='color:var(--text-muted)'>Khong co</span>"}</div>
+        </div>`;
+
+    document.getElementById("pkt-modal").classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+}
+
+function closePktModal(e) {
+    if (e && e.target !== document.getElementById("pkt-modal")) return;
+    document.getElementById("pkt-modal").classList.add("hidden");
+    document.body.style.overflow = "";
+}
+document.addEventListener("keydown", e => {
+    if (e.key === "Escape") { closeModal(); closePktModal(); }
+});
+
 // ── Ping ──────────────────────────────────────────────────────
 async function doPing() {
     const ip = document.getElementById("ping-ip").value.trim();
@@ -411,7 +650,7 @@ async function doPing() {
 window.addEventListener("resize", () => drawChart(_chartData));
 
 async function refreshAll() {
-    await Promise.all([refreshStatus(), loadDmesg(), loadSecEvents()]);
+    await Promise.all([refreshStatus(), loadDmesg(), loadSecEvents(), loadPacketLog()]);
 }
 
 (async function init() {
@@ -423,4 +662,5 @@ async function refreshAll() {
     setInterval(pollLog, 1500);
     setInterval(loadDmesg, 10000);
     setInterval(loadSecEvents, 5000);
+    setInterval(loadPacketLog, 6000);
 })();
