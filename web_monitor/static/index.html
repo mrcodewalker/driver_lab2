@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>AIC Semi USB Driver Monitor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <header>
+        <div class="header-inner">
+            <div class="logo">
+                <span class="logo-icon">⬡</span>
+                <div>
+                    <div class="logo-title">AIC Semi USB Driver</div>
+                    <div class="logo-sub">Network Monitor v4.0</div>
+                </div>
+            </div>
+            <div class="header-status" id="hdr-status">
+                <span class="dot dot-gray" id="dot-usb"></span><span id="lbl-usb">USB</span>
+                <span class="dot dot-gray" id="dot-mod"></span><span id="lbl-mod">Module</span>
+                <span class="dot dot-gray" id="dot-iface"></span><span id="lbl-iface">Interface</span>
+            </div>
+            <div class="header-time" id="hdr-time"></div>
+        </div>
+    </header>
+
+    <main>
+        <!-- LEFT PANEL -->
+        <aside class="sidebar">
+
+            <!-- USB Device Card -->
+            <div class="card">
+                <div class="card-title">USB Device</div>
+                <div class="info-row"><span class="lbl">Vendor</span><span class="val" id="usb-line">—</span></div>
+                <div class="info-row"><span class="lbl">Mode</span>
+                    <span class="badge" id="usb-mode-badge">—</span>
+                </div>
+                <div class="info-row"><span class="lbl">PID</span><span class="val mono" id="usb-pid">—</span></div>
+            </div>
+
+            <!-- Interface Card -->
+            <div class="card">
+                <div class="card-title">Network Interface</div>
+                <div class="info-row"><span class="lbl">Name</span><span class="val mono" id="if-name">aic0</span></div>
+                <div class="info-row"><span class="lbl">Status</span><span class="badge" id="if-status-badge">—</span>
+                </div>
+                <div class="info-row"><span class="lbl">MAC</span><span class="val mono" id="if-mac">—</span></div>
+                <div class="info-row"><span class="lbl">IP</span><span class="val mono" id="if-ip">—</span></div>
+                <div class="row-gap">
+                    <input class="inp" id="inp-ip" placeholder="192.168.99.1/24" value="192.168.99.1/24">
+                    <button class="btn btn-green" onclick="ifUp()">UP</button>
+                    <button class="btn btn-red" onclick="ifDown()">DOWN</button>
+                </div>
+            </div>
+
+            <!-- Stats Card -->
+            <div class="card">
+                <div class="card-title">Statistics</div>
+                <div class="stat-grid" id="stat-grid">
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-tx">0</div>
+                        <div class="stat-lbl">TX pkts</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-rx">0</div>
+                        <div class="stat-lbl">RX pkts</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-txb">0</div>
+                        <div class="stat-lbl">TX bytes</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-drop">0</div>
+                        <div class="stat-lbl">Dropped</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-tcp">0</div>
+                        <div class="stat-lbl">TCP</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-udp">0</div>
+                        <div class="stat-lbl">UDP</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-icmp">0</div>
+                        <div class="stat-lbl">ICMP</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-val" id="s-arp">0</div>
+                        <div class="stat-lbl">ARP</div>
+                    </div>
+                </div>
+                <div class="proto-bars" id="proto-bars"></div>
+            </div>
+
+        </aside>
+
+        <!-- CENTER PANEL -->
+        <section class="center">
+
+            <!-- Action Buttons -->
+            <div class="card actions-card">
+                <div class="card-title">Driver Actions</div>
+                <div class="actions-grid">
+                    <button class="btn btn-cyan" onclick="doAction('compile')">⚙ Compile</button>
+                    <button class="btn btn-blue" onclick="doAction('setup')">▶ Setup</button>
+                    <button class="btn btn-blue" onclick="doAction('restart')">↺ Restart</button>
+                    <button class="btn btn-yellow" onclick="doAction('modeswitch')">⇄ Modeswitch</button>
+                    <button class="btn btn-green" onclick="doAction('demo')">▷ Run Demo</button>
+                    <button class="btn btn-red" onclick="doAction('unload')">■ Unload</button>
+                    <button class="btn btn-gray" onclick="doAction('clear_ring')">✕ Clear Ring</button>
+                    <button class="btn btn-gray" onclick="refreshAll()">⟳ Refresh</button>
+                </div>
+            </div>
+
+            <!-- Ping Tool -->
+            <div class="card">
+                <div class="card-title">Ping Tool</div>
+                <div class="ping-row">
+                    <input class="inp" id="ping-ip" placeholder="Target IP" value="192.168.99.2">
+                    <input class="inp inp-sm" id="ping-iface" placeholder="Interface" value="aic0">
+                    <select class="inp inp-sm" id="ping-count">
+                        <option>2</option>
+                        <option selected>4</option>
+                        <option>6</option>
+                        <option>10</option>
+                    </select>
+                    <button class="btn btn-cyan" onclick="doPing()">Ping</button>
+                </div>
+                <div id="ping-result" class="ping-result hidden"></div>
+            </div>
+
+            <!-- Protocol Chart -->
+            <div class="card">
+                <div class="card-title">Protocol Distribution (TX)</div>
+                <canvas id="proto-chart" height="160"></canvas>
+            </div>
+
+            <!-- dmesg Log -->
+            <div class="card card-grow">
+                <div class="card-title-row">
+                    <span class="card-title">dmesg — [aicsemi]</span>
+                    <button class="btn btn-xs btn-gray" onclick="loadDmesg()">⟳</button>
+                </div>
+                <div class="log-box" id="dmesg-box"></div>
+            </div>
+
+        </section>
+
+        <!-- RIGHT PANEL -->
+        <aside class="sidebar sidebar-right">
+
+            <!-- Action Log -->
+            <div class="card card-grow">
+                <div class="card-title-row">
+                    <span class="card-title">Action Log</span>
+                    <button class="btn btn-xs btn-red" onclick="clearLog()">Clear</button>
+                </div>
+                <div class="log-box" id="action-log"></div>
+            </div>
+
+            <!-- /proc monitor -->
+            <div class="card">
+                <div class="card-title">/proc/aicsemi_usbnet/monitor</div>
+                <pre class="proc-box" id="proc-box">—</pre>
+            </div>
+
+        </aside>
+    </main>
+
+    <!-- Toast -->
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
