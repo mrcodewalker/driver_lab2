@@ -288,12 +288,32 @@ function openSecModal(idx) {
         </div>
         ${ev.hex ? `
         <div class="modal-section">
-            <div class="modal-section-title">Hex dump (ciphertext/tag)</div>
-            <div class="modal-field">
-                <span class="modal-hex">${escHtml(ev.hex)}</span>
-                <div style="margin-top:6px;font-size:10px;color:var(--text-secondary)">
-                    Du lieu sau XOR encrypt (key=0xA1) + HMAC-SHA256 tag 8 bytes cuoi
+            <div class="modal-section-title">Hex dump (ciphertext + HMAC tag)</div>
+            <div class="hex-dump-box">
+                <div class="hex-header">
+                    <span class="hex-off">OFFS</span>
+                    <span style="color:var(--text-muted)">  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f</span>
+                    <span class="hex-asc" style="margin-left:8px">ASCII</span>
                 </div>
+                ${(function () {
+                const bytes = ev.hex.split(" ").filter(Boolean);
+                const ct = bytes.slice(0, -8), tag = bytes.slice(-8);
+                function rows(arr, color) {
+                    return arr.reduce((acc, _, i) => {
+                        if (i % 16 !== 0) return acc;
+                        const chunk = arr.slice(i, i + 16);
+                        const off = i.toString(16).padStart(4, "0");
+                        const hex = chunk.join(" ").padEnd(47, " ");
+                        const asc = chunk.map(b => { const c = parseInt(b, 16); return c >= 32 && c < 127 ? String.fromCharCode(c) : "."; }).join("");
+                        return acc + '<div class="hex-row"><span class="hex-off">' + off + '</span>  <span style="color:' + color + '">' + hex + '</span>  <span class="hex-asc">' + asc + '</span></div>';
+                    }, "");
+                }
+                return rows(ct, "#58a6ff") + '<div style="border-top:1px dashed var(--border);margin:4px 0;font-size:10px;color:var(--text-muted)">── HMAC-SHA256 tag (8 bytes) ──</div>' + rows(tag, isTamp ? "#f85149" : "#3fb950");
+            })()}
+            </div>
+            <div style="margin-top:6px;font-size:10px;color:var(--text-secondary)">
+                <span style="color:#58a6ff">■</span> AES-128-CTR ciphertext &nbsp;|&nbsp;
+                <span style="color:${isTamp ? "#f85149" : "#3fb950"}">■</span> HMAC-SHA256 tag (8B truncated)
             </div>
         </div>`: ""}
         <div class="modal-section">
@@ -303,13 +323,13 @@ function openSecModal(idx) {
         <div class="modal-section">
             <div class="modal-section-title">Luong xu ly</div>
             <div class="modal-field info" style="font-family:var(--font-sans);font-size:11px;line-height:1.9;color:var(--text-secondary)">
-                demo.c &#8594; XOR(payload, key=0xA1) &#8594; append HMAC[8]<br>
+                demo.c &#8594; AES-128-CTR(payload, key, nonce) &#8594; append HMAC-SHA256[8]<br>
                 &#8594; AF_PACKET sendto() &#8594; kernel dev_queue_xmit()<br>
                 &#8594; <b style="color:var(--cyan)">aicsemi_net_xmit()</b> &#8594; aic_verify_hmac()<br>
                 &#8594; ${isTamp
             ? '<b style="color:var(--red)">HMAC mismatch &#8594; tx_tampered++ &#8594; log [SECURITY]</b>'
             : isOk
-                ? '<b style="color:var(--green)">HMAC match &#8594; tx_encrypted++ &#8594; aic_xor_decrypt() &#8594; log plaintext</b>'
+                ? '<b style="color:var(--green)">HMAC match &#8594; tx_encrypted++ &#8594; aic_aes_ctr_decrypt() &#8594; log plaintext</b>'
                 : 'log crypto info'}
             </div>
         </div>`;
@@ -533,8 +553,8 @@ function openPktModal(idx) {
             body: `Payload duoc ma hoa bang AES-128-CTR:<br>
                    <code>keystream = AES_ECB(key, counter)</code><br>
                    <code>ciphertext[i] = plaintext[i] XOR keystream[i]</code><br><br>
-                   Key (128-bit): <code>A1 C5 E1 1B 5B 4D 3C 1D E4 0D E5 16 4E 0A 1F 2B</code><br>
-                   Nonce: <code>00 01 02 03 04 05 06 07 08 09 0A 0B 00 00 00 01</code><br>
+                   AES Key (128-bit): <code style="color:var(--cyan)">2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c</code><br>
+                   Nonce (CTR IV)   : <code style="color:var(--cyan)">f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 fa fb 00 00 00 01</code><br>
                    Toan bo payload duoc ma hoa truoc khi gui.`,
             hex: p.cipher_hex || "",
         });
@@ -544,7 +564,7 @@ function openPktModal(idx) {
             num: "3", cls: "blue",
             title: "Tinh HMAC-SHA256 (truncated 8 bytes)",
             body: `HMAC = SHA256( (key XOR opad) || SHA256( (key XOR ipad) || ciphertext ) )<br>
-                   Key: <code>A1 C5 E1 1B 5B 4D 3C 1D E4 0D E5 16 4E 0A 1F 2B</code><br>
+                   HMAC Key (256-bit): <code style="color:var(--purple)">60 3d eb 10 15 ca 71 be 2b 73 ae f0 85 7d 77 81 1f 35 2c 07 3b 61 08 d7 2d 98 10 a3 09 14 df f4</code><br>
                    Lay 8 byte dau cua HMAC-SHA256 lam tag, append vao cuoi payload.<br>
                    <b>Cau truc goi cuoi: [ ETH | IP | L4 | AES-128-CTR(payload) | HMAC[8] ]</b>`,
         });
@@ -677,32 +697,42 @@ async function loadRawPackets() {
 function renderRawPackets(pkts, note) {
     const box = document.getElementById("raw-pkt-list");
     if (!box) return;
+    const countEl = document.getElementById("raw-pkt-count");
+    if (countEl) countEl.textContent = pkts.length ? `${pkts.length} gói` : "";
     if (pkts.length === 0) {
-        box.innerHTML = `<div class="sec-empty">${escHtml(note || "Chua co du lieu -- chay Run Demo")}</div>`;
+        box.innerHTML = `<div class="sec-empty">${escHtml(note || "Chưa có dữ liệu — chạy Run Demo")}</div>`;
         return;
     }
     box.innerHTML = pkts.map((p, idx) => {
         const isTamp = p.tampered;
-        const cls = isTamp ? "tamper" : "ok";
-        const icon = isTamp ? "&#128680;" : "&#128190;";
+        const isOk = p.hmac_ok;
+        const cls = isTamp ? "tamper" : isOk ? "ok" : "none";
+        const icon = isTamp ? "&#128680;" : isOk ? "&#128272;" : "&#128190;";
         const protoLo = (p.proto || "").toLowerCase();
         const protoCls = protoLo.includes("tcp") ? "tcp"
-            : protoLo.includes("udp") ? "udp"
-                : protoLo.includes("icmp") ? "icmp" : "other";
+            : protoLo.includes("udp") || protoLo.includes("dns") ? "udp"
+                : protoLo.includes("icmp") ? "icmp"
+                    : protoLo.includes("arp") ? "arp" : "other";
         const protoShort = protoLo.includes("tcp") ? "TCP"
             : protoLo.includes("dns") ? "DNS"
                 : protoLo.includes("udp") ? "UDP"
-                    : protoLo.includes("icmp") ? "ICMP" : "PKT";
-        const hexPreview = p.full_hex.split(" ").slice(0, 8).join(" ") + (p.full_hex.split(" ").length > 8 ? " ..." : "");
-        return `<div class="pkt-row ${cls}" onclick="openRawModal(${idx})" title="Click xem full hex dump">
-            <div class="pkt-seq">${icon}</div>
+                    : protoLo.includes("icmp") ? "ICMP"
+                        : protoLo.includes("arp") ? "ARP" : "PKT";
+        const hasHex = p.full_hex && p.full_hex.trim().length > 0;
+        const hexPreview = hasHex
+            ? p.full_hex.split(" ").slice(0, 10).join(" ") + (p.full_hex.split(" ").length > 10 ? " ..." : "")
+            : (p.src_ip ? `${p.src_ip} → ${p.dst_ip}` : "no hex — xem dmesg");
+        const hmacTxt = isTamp ? "FAIL" : isOk ? "OK" : "--";
+        return `<div class="pkt-row ${cls}" onclick="openRawModal(${idx})" title="Click xem full hex dump + chi tiet ma hoa">
+            <div class="pkt-seq">${icon} #${p.seq}</div>
             <div class="pkt-proto ${protoCls}">${protoShort}</div>
             <div class="pkt-info" style="font-family:var(--font-mono);font-size:10px">${escHtml(hexPreview)}</div>
-            <div class="pkt-bytes">${p.full_hex.split(" ").length}B</div>
-            <div class="pkt-hmac ${cls}">${isTamp ? "TAMP" : "OK"}</div>
+            <div class="pkt-bytes">${p.bytes}B</div>
+            <div class="pkt-hmac ${cls}">${hmacTxt}</div>
         </div>`;
     }).join("");
 }
+
 
 function openRawModal(idx) {
     const p = _rawPackets[idx]; if (!p) return;

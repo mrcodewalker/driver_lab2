@@ -209,6 +209,24 @@
                 </div>
             </div>
 
+            <!-- Raw Packet Hex — ngay dưới Security Events -->
+            <div class="card">
+                <div class="card-title-row">
+                    <span class="card-title">&#128190; Raw Packet Hex — Cipher + HMAC Tag</span>
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <span id="raw-pkt-count" style="font-size:10px;color:var(--text-muted)"></span>
+                        <button class="btn btn-xs btn-cyan" onclick="loadRawPackets()">&#8635; Refresh</button>
+                    </div>
+                </div>
+                <div
+                    style="font-size:10px;color:var(--text-secondary);margin-bottom:8px;padding:5px 8px;background:rgba(6,182,212,.06);border:1px solid rgba(6,182,212,.15);border-radius:5px">
+                    Click vào gói để xem full hex dump (ciphertext + HMAC tag) và chi tiết mã hóa
+                </div>
+                <div id="raw-pkt-list" class="pkt-log-table" style="max-height:260px">
+                    <div class="sec-empty">Chưa có dữ liệu — chạy Run Demo</div>
+                </div>
+            </div>
+
             <!-- dmesg Log -->
             <div class="card card-grow">
                 <div class="card-title-row">
@@ -246,17 +264,6 @@
                 </div>
                 <div id="pkt-log-table" class="pkt-log-table">
                     <div class="sec-empty">Chua co du lieu -- chay Demo</div>
-                </div>
-            </div>
-
-            <!-- Raw Packet Hex Viewer -->
-            <div class="card">
-                <div class="card-title-row">
-                    <span class="card-title">&#128190; Raw Packet Hex</span>
-                    <button class="btn btn-xs btn-cyan" onclick="loadRawPackets()">&#8635; Refresh</button>
-                </div>
-                <div id="raw-pkt-list" class="pkt-log-table">
-                    <div class="sec-empty">Chua co du lieu -- chay Run Demo</div>
                 </div>
             </div>
 

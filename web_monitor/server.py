@@ -558,13 +558,101 @@ def _parse_demo_stdout(stdout: str) -> list:
 
 @app.route("/api/raw_packets")
 def api_raw_packets():
-    """Tra ve raw cipher+tag hex dump tu lan chay demo gan nhat."""
+    """
+    Tra ve raw cipher+tag hex dump tu dmesg (sau server start).
+    Parse cac dong co hex dump tu driver log: [CRYPTO] va [SECURITY].
+    Ket hop voi TX log de biet proto/seq.
+    """
+    r = run_cmd(["dmesg"])
+    all_aic = dmesg_since_start(
+        [l for l in r["stdout"].splitlines() if "aicsemi" in l]
+    )
+
+    packets = []
+    # Reuse api_packet_log logic but also grab cipher/plain hex from dmesg
+    pkt_map = {}   # seq -> dict
+    order   = []
+
+    for line in all_aic:
+        lo   = line.lower()
+        ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
+        ts   = ts_m.group(1) if ts_m else ""
+        msg  = re.sub(r"^\[.*?\]\s*\[aicsemi\]\s*", "", line, flags=re.IGNORECASE).strip()
+
+        tx_m = re.search(r"\[TX #(\d+)\s*\]", line)
+        if tx_m:
+            seq = int(tx_m.group(1))
+            proto = "Unknown"
+            for p in ["IPv4 / TCP","IPv4 / UDP","IPv4 / DNS","IPv4 / ICMP","IPv6","ARP","IPv4"]:
+                if p in line: proto = p; break
+            bytes_m = re.search(r"bytes=(\d+)", line)
+            pkt_map[seq] = {
+                "seq": seq, "proto": proto, "ts": ts,
+                "bytes": int(bytes_m.group(1)) if bytes_m else 0,
+                "plain_text": "", "cipher_hex": "", "hmac_tag": "",
+                "full_hex": "", "tampered": False,
+                "hmac_ok": False, "src_ip": "", "dst_ip": "",
+            }
+            order.append(seq)
+            continue
+
+        # IP detail
+        ip_m = re.search(r"(\d+\.\d+\.\d+\.\d+).*?(\d+\.\d+\.\d+\.\d+)", line)
+        if ip_m and order and not pkt_map[order[-1]]["src_ip"]:
+            pkt_map[order[-1]]["src_ip"] = ip_m.group(1)
+            pkt_map[order[-1]]["dst_ip"] = ip_m.group(2)
+
+        # HMAC OK — extract plaintext hex from next line
+        if "hmac ok" in lo and "tx #" in lo:
+            seq_m = re.search(r"tx #(\d+)", lo)
+            if seq_m:
+                s = int(seq_m.group(1))
+                if s in pkt_map:
+                    pkt_map[s]["hmac_ok"] = True
+
+        # HMAC FAIL
+        elif "hmac fail" in lo and "tx #" in lo:
+            seq_m = re.search(r"tx #(\d+)", lo)
+            if seq_m:
+                s = int(seq_m.group(1))
+                if s in pkt_map:
+                    pkt_map[s]["tampered"] = True
+
+        # Plaintext preview hex (after AES-CTR decrypt)
+        elif "plaintext" in lo:
+            hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
+            if hex_m and order:
+                pkt_map[order[-1]]["plain_text"] = hex_m[0]
+
+        # Ciphertext hex
+        elif "ciphertext" in lo:
+            hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
+            if hex_m and order:
+                raw = hex_m[0]
+                parts = raw.split()
+                tag_b = parts[-8:] if len(parts) >= 8 else []
+                ct_b  = parts[:-8] if len(parts) >= 8 else parts
+                pkt_map[order[-1]]["cipher_hex"] = " ".join(ct_b)
+                pkt_map[order[-1]]["hmac_tag"]   = " ".join(tag_b)
+                pkt_map[order[-1]]["full_hex"]   = raw
+
+    # Also try to get hex from demo stdout if available
     with _LAST_DEMO_LOCK:
         stdout = _LAST_DEMO_STDOUT
-    if not stdout:
-        return jsonify({"packets": [], "note": "Chua co du lieu -- chay Run Demo truoc"})
-    pkts = _parse_demo_stdout(stdout)
-    return jsonify({"packets": pkts, "total": len(pkts)})
+    if stdout:
+        stdout_pkts = _parse_demo_stdout(stdout)
+        # Merge: match by order index
+        for i, sp in enumerate(stdout_pkts):
+            if i < len(order):
+                s = order[i]
+                if not pkt_map[s]["full_hex"] and sp.get("full_hex"):
+                    pkt_map[s]["cipher_hex"] = sp["cipher_hex"]
+                    pkt_map[s]["hmac_tag"]   = sp["hmac_tag"]
+                    pkt_map[s]["full_hex"]   = sp["full_hex"]
+                    pkt_map[s]["tampered"]   = sp["tampered"]
+
+    result = [pkt_map[s] for s in order if s in pkt_map and pkt_map[s]["bytes"] > 0]
+    return jsonify({"packets": result, "total": len(result)})
 
 
 if __name__ == "__main__":
