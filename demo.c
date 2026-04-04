@@ -2,12 +2,12 @@
  * demo.c — AIC Semi USB Network Driver Demo v5.0
  *
  * TÍNH NĂNG MỚI (Hướng 2+4):
- *   - XOR cipher encrypt payload trước khi gửi
+ *   - AES-128-CTR encrypt payload trước khi gửi
  *   - HMAC-SHA256 (truncated 8 bytes) append vào cuối payload
  *   - Driver kernel verify HMAC → phát hiện gói bị tamper
  *
  * Cấu trúc gói có mã hóa:
- *   [ Ethernet | IP | TCP/UDP/ICMP | XOR(payload) | HMAC[8] ]
+ *   [ Ethernet | IP | TCP/UDP/ICMP | AES-128-CTR(payload) | HMAC[8] ]
  *
  * Build:  gcc -Wall -O2 -o demo demo.c
  * Chạy:   sudo ./demo [interface]
@@ -45,8 +45,26 @@
 #define DNS_SRV  "8.8.8.8"
 
 /* ── Crypto constants ── */
-#define XOR_KEY       0xA1          /* XOR key 1 byte — đơn giản, dễ demo */
 #define HMAC_TAG_LEN  8             /* truncated HMAC: 8 bytes append vào cuối payload */
+
+/*
+ * AES_KEY: khóa AES-128 chia sẻ giữa demo.c và usb.c (driver).
+ * Trong thực tế sẽ được trao đổi qua kênh an toàn.
+ * Ở đây hardcode để demo — driver dùng cùng key này để decrypt.
+ */
+static const uint8_t AES_KEY[16] = {
+    0xA1, 0xC5, 0xE1, 0x1B, 0x5B, 0x4D, 0x3C, 0x1D,
+    0xE4, 0x0D, 0xE5, 0x16, 0x4E, 0x0A, 0x1F, 0x2B
+};
+
+/*
+ * AES_NONCE: nonce cố định 16 byte cho CTR mode (demo simplicity).
+ * Trong thực tế phải dùng nonce ngẫu nhiên và truyền kèm gói.
+ */
+static const uint8_t AES_NONCE[16] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0A, 0x0B, 0x00, 0x00, 0x00, 0x01
+};
 
 /*
  * HMAC_KEY: khóa bí mật chia sẻ giữa demo.c và usb.c (driver).
@@ -57,6 +75,134 @@ static const uint8_t HMAC_KEY[16] = {
     0xA1, 0xC5, 0xE1, 0x1B, 0x5B, 0x4D, 0x3C, 0x1D,
     0xE4, 0x0D, 0xE5, 0x16, 0x4E, 0x0A, 0x1F, 0x2B
 };
+
+/* ================================================================
+ * MINI AES-128 + CTR MODE — Public domain, no OpenSSL dependency
+ *
+ * AES core from Kokke's tiny-AES-c (public domain):
+ *   https://github.com/kokke/tiny-AES-c
+ * CTR mode implemented inline below.
+ * ================================================================ */
+
+/* AES S-box */
+static const uint8_t sbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+
+/* Rcon table for key expansion */
+static const uint8_t rcon[11] = {
+    0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36
+};
+
+/* GF(2^8) multiply by 2 */
+static inline uint8_t xtime(uint8_t x) {
+    return (uint8_t)((x << 1) ^ ((x >> 7) ? 0x1b : 0));
+}
+
+/* AES key schedule: expand 16-byte key into 176-byte round keys */
+static void aes128_key_expand(const uint8_t *key, uint8_t *rk) {
+    int i;
+    memcpy(rk, key, 16);
+    for (i = 1; i <= 10; i++) {
+        uint8_t *prev = rk + (i-1)*16;
+        uint8_t *cur  = rk + i*16;
+        /* RotWord + SubWord + Rcon on last word of previous round */
+        cur[0]  = sbox[prev[13]] ^ rcon[i] ^ prev[0];
+        cur[1]  = sbox[prev[14]]            ^ prev[1];
+        cur[2]  = sbox[prev[15]]            ^ prev[2];
+        cur[3]  = sbox[prev[12]]            ^ prev[3];
+        /* Remaining 3 words */
+        cur[4]  = cur[0] ^ prev[4];  cur[5]  = cur[1] ^ prev[5];
+        cur[6]  = cur[2] ^ prev[6];  cur[7]  = cur[3] ^ prev[7];
+        cur[8]  = cur[4] ^ prev[8];  cur[9]  = cur[5] ^ prev[9];
+        cur[10] = cur[6] ^ prev[10]; cur[11] = cur[7] ^ prev[11];
+        cur[12] = cur[8] ^ prev[12]; cur[13] = cur[9] ^ prev[13];
+        cur[14] = cur[10]^ prev[14]; cur[15] = cur[11]^ prev[15];
+    }
+}
+
+/* AES-128 encrypt a single 16-byte block (ECB) */
+static void aes128_encrypt_block(const uint8_t *rk, const uint8_t *in, uint8_t *out) {
+    uint8_t s[16]; int r, i;
+    /* AddRoundKey (round 0) */
+    for (i = 0; i < 16; i++) s[i] = in[i] ^ rk[i];
+
+    for (r = 1; r <= 10; r++) {
+        const uint8_t *k = rk + r*16;
+        uint8_t t[16];
+        /* SubBytes */
+        for (i = 0; i < 16; i++) t[i] = sbox[s[i]];
+        /* ShiftRows */
+        uint8_t tmp;
+        tmp=t[1]; t[1]=t[5]; t[5]=t[9]; t[9]=t[13]; t[13]=tmp;
+        tmp=t[2]; t[2]=t[10]; t[10]=tmp; tmp=t[6]; t[6]=t[14]; t[14]=tmp;
+        tmp=t[15]; t[15]=t[11]; t[11]=t[7]; t[7]=t[3]; t[3]=tmp;
+        /* MixColumns (skip on last round) */
+        if (r < 10) {
+            for (i = 0; i < 4; i++) {
+                uint8_t a0=t[i*4],a1=t[i*4+1],a2=t[i*4+2],a3=t[i*4+3];
+                s[i*4]   = xtime(a0)^xtime(a1)^a1^a2^a3;
+                s[i*4+1] = a0^xtime(a1)^xtime(a2)^a2^a3;
+                s[i*4+2] = a0^a1^xtime(a2)^xtime(a3)^a3;
+                s[i*4+3] = xtime(a0)^a0^a1^a2^xtime(a3);
+            }
+        } else {
+            memcpy(s, t, 16);
+        }
+        /* AddRoundKey */
+        for (i = 0; i < 16; i++) s[i] ^= k[i];
+    }
+    memcpy(out, s, 16);
+}
+
+/*
+ * aes128_ctr_crypt() — AES-128-CTR encrypt/decrypt (symmetric)
+ *
+ * counter block = nonce (16 bytes), incremented as big-endian 128-bit
+ * for each 16-byte keystream block.
+ */
+static void aes128_ctr_crypt(const uint8_t *key, const uint8_t *nonce,
+                               uint8_t *data, size_t len)
+{
+    uint8_t rk[176];          /* 11 round keys × 16 bytes */
+    uint8_t counter[16];
+    uint8_t keystream[16];
+    size_t  i, pos = 0;
+
+    aes128_key_expand(key, rk);
+    memcpy(counter, nonce, 16);
+
+    while (pos < len) {
+        /* Encrypt counter block to get keystream */
+        aes128_encrypt_block(rk, counter, keystream);
+
+        /* XOR keystream into data */
+        size_t block = (len - pos < 16) ? (len - pos) : 16;
+        for (i = 0; i < block; i++)
+            data[pos + i] ^= keystream[i];
+        pos += block;
+
+        /* Increment counter (big-endian) */
+        for (i = 15; i < 16; i--) {
+            if (++counter[i]) break;
+        }
+    }
+}
 
 /* ================================================================
  * MINI SHA-256 — Không dùng OpenSSL, tự implement để không cần dep
@@ -139,11 +285,6 @@ static void hmac_sha256_truncated(const uint8_t *key, size_t klen,
     memcpy(out8,full,8);
 }
 
-/* XOR encrypt/decrypt — symmetric, cùng hàm dùng cho cả 2 chiều */
-static void xor_crypt(uint8_t *data, size_t len, uint8_t key) {
-    for(size_t i=0;i<len;i++) data[i]^=key;
-}
-
 /* In hex dump đẹp */
 static void hexdump(const char *label, const uint8_t *d, size_t n) {
     printf("  %s%s%s  ", MAG, label, RST);
@@ -215,7 +356,7 @@ static void pkt_log(int ok,const char *type,const char *det){
  *
  * Hàm này nhận buffer chứa payload (phần sau header IP/TCP/UDP/ICMP),
  * thực hiện:
- *   1. XOR encrypt toàn bộ payload
+ *   1. AES-128-CTR encrypt toàn bộ payload
  *   2. Tính HMAC-SHA256(HMAC_KEY, encrypted_payload)
  *   3. Append 8 byte HMAC tag vào cuối buffer
  *
@@ -229,8 +370,8 @@ static size_t encrypt_and_tag(uint8_t *payload, size_t plen,
     /* Bước 1: Copy payload vào out_buf */
     memcpy(out_buf, payload, plen);
 
-    /* Bước 2: XOR encrypt */
-    xor_crypt(out_buf, plen, XOR_KEY);
+    /* Bước 2: AES-128-CTR encrypt */
+    aes128_ctr_crypt(AES_KEY, AES_NONCE, out_buf, plen);
 
     /* Bước 3: Tính HMAC trên ciphertext */
     uint8_t tag[HMAC_TAG_LEN];
@@ -263,11 +404,11 @@ static void demo_arp(void)
     usleep(300000);
 }
 
-/* ── Demo ICMP với XOR + HMAC ── */
+/* ── Demo ICMP với AES-128-CTR + HMAC ── */
 static void demo_icmp_enc(int n)
 {
-    printf("\n"BOLD"  [2] ICMP Echo + XOR encrypt + HMAC"RST" ×%d\n",n);sep();
-    printf("  "DIM"Payload: XOR(0x%02x) → append HMAC[8 bytes]\n"RST, XOR_KEY);sep();
+    printf("\n"BOLD"  [2] ICMP Echo + AES-128-CTR encrypt + HMAC"RST" ×%d\n",n);sep();
+    printf("  "DIM"Payload: AES-128-CTR → append HMAC[8 bytes]\n"RST);sep();
 
     for(int i=0;i<n&&g_running;i++){
         /* Payload gốc */
@@ -314,20 +455,20 @@ static void demo_icmp_enc(int n)
         hexdump("cipher+tag:", enc_buf, enc_len);
 
         char det[80];
-        snprintf(det,sizeof(det),"%s→%s seq=%d [XOR+HMAC] %zuB",SRC_IP,DST_IP,i+1,flen);
+        snprintf(det,sizeof(det),"%s→%s seq=%d [AES-128-CTR+HMAC] %zuB",SRC_IP,DST_IP,i+1,flen);
         pkt_log(tx_raw(frame,flen)>0,"ICMP+ENC",det);
         usleep(350000);
     }
 }
 
-/* ── Demo TCP SYN với XOR + HMAC trên options field ── */
+/* ── Demo TCP SYN với AES-128-CTR + HMAC trên options field ── */
 static void demo_tcp_enc(int n)
 {
     uint16_t dp[]={80,443,22,8080,3000};
     const char *sv[]={"HTTP","HTTPS","SSH","HTTP-alt","App"};
 
-    printf("\n"BOLD"  [3] TCP SYN + XOR encrypt + HMAC"RST" ×%d\n",n);sep();
-    printf("  "DIM"Payload: app data XOR(0x%02x) → HMAC[8]\n"RST,XOR_KEY);sep();
+    printf("\n"BOLD"  [3] TCP SYN + AES-128-CTR encrypt + HMAC"RST" ×%d\n",n);sep();
+    printf("  "DIM"Payload: app data AES-128-CTR → HMAC[8]\n"RST);sep();
 
     for(int i=0;i<n&&g_running;i++){
         char plain[32];
@@ -367,13 +508,13 @@ static void demo_tcp_enc(int n)
 
         hexdump("cipher+tag:", enc_buf, enc_len);
         char det[80];
-        snprintf(det,sizeof(det),"%s:%u→%s:%u(%s)[SYN+ENC]",SRC_IP,50000+i,DST_IP,dp[i%5],sv[i%5]);
+        snprintf(det,sizeof(det),"%s:%u→%s:%u(%s)[SYN+AES-CTR]",SRC_IP,50000+i,DST_IP,dp[i%5],sv[i%5]);
         pkt_log(tx_raw(frame,flen)>0,"TCP+ENC",det);
         usleep(300000);
     }
 }
 
-/* ── Demo UDP/DNS với XOR + HMAC ── */
+/* ── Demo UDP/DNS với AES-128-CTR + HMAC ── */
 static void demo_dns_enc(int n)
 {
     static const uint8_t Q[]={
@@ -382,8 +523,8 @@ static void demo_dns_enc(int n)
         0x00,0x01,0x00,0x01
     };
 
-    printf("\n"BOLD"  [4] UDP DNS + XOR encrypt + HMAC"RST" ×%d\n",n);sep();
-    printf("  "DIM"DNS query payload XOR(0x%02x) → HMAC[8]\n"RST,XOR_KEY);sep();
+    printf("\n"BOLD"  [4] UDP DNS + AES-128-CTR encrypt + HMAC"RST" ×%d\n",n);sep();
+    printf("  "DIM"DNS query payload AES-128-CTR → HMAC[8]\n"RST);sep();
 
     for(int i=0;i<n&&g_running;i++){
         uint8_t dns_copy[sizeof(Q)];
@@ -473,10 +614,10 @@ int main(int argc, char *argv[])
 
     printf("\n");sep2();
     printf("  "BOLD CYN"  AIC SEMI USB WIFI — Crypto Demo v5.0\n"RST);
-    printf("  "DIM"  XOR Encrypt + HMAC-SHA256 Integrity\n"RST);
+    printf("  "DIM"  AES-128-CTR Encrypt + HMAC-SHA256 Integrity\n"RST);
     sep2();
     printf("\n");
-    printf("  "DIM"Luồng: demo.c → XOR(payload) + HMAC[8] → AF_PACKET\n"RST);
+    printf("  "DIM"Luồng: demo.c → AES-128-CTR(payload) + HMAC[8] → AF_PACKET\n"RST);
     printf("  "DIM"        → ndo_start_xmit() → verify HMAC → log dmesg\n"RST);
     printf("  "BOLD"Xem log: "RST CYN"sudo dmesg -w | grep --color aicsemi\n"RST"\n");
 
@@ -491,7 +632,9 @@ int main(int argc, char *argv[])
     if(!open_sock()){printf("  "RED"[✗]"RST" Cần sudo\n");return 1;}
     printf("  "GRN"[✓]"RST" MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
            g_src_mac[0],g_src_mac[1],g_src_mac[2],g_src_mac[3],g_src_mac[4],g_src_mac[5]);
-    printf("  "GRN"[✓]"RST" XOR key : 0x%02X\n",XOR_KEY);
+    printf("  "GRN"[✓]"RST" AES key : ");
+    for(int i=0;i<16;i++) printf("%02x",AES_KEY[i]);
+    printf(" (128-bit)\n");
     printf("  "GRN"[✓]"RST" HMAC key: ");
     for(int i=0;i<16;i++) printf("%02x",HMAC_KEY[i]);
     printf(" (16 bytes)\n");

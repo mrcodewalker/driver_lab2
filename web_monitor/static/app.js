@@ -1,4 +1,4 @@
-/* app.js - AIC Semi USB Driver Web Monitor v5.0 */
+﻿/* app.js - AIC Semi USB Driver Web Monitor v5.0 */
 "use strict";
 
 const PROTO_COLORS = {
@@ -529,10 +529,12 @@ function openPktModal(idx) {
     if (!protoLo.includes("arp")) {
         steps.push({
             num: "2", cls: "blue",
-            title: "Ma hoa payload -- XOR cipher (key=0xA1)",
-            body: `Payload duoc XOR voi key <b>0xA1</b> byte-by-byte:<br>
-                   <code>ciphertext[i] = plaintext[i] XOR 0xA1</code><br><br>
-                   Vi du: chu 'A' (0x41) &#8594; 0x41 XOR 0xA1 = <b>0xE0</b><br>
+            title: "Ma hoa payload -- AES-128-CTR (key=AES_KEY, nonce=AES_NONCE)",
+            body: `Payload duoc ma hoa bang AES-128-CTR:<br>
+                   <code>keystream = AES_ECB(key, counter)</code><br>
+                   <code>ciphertext[i] = plaintext[i] XOR keystream[i]</code><br><br>
+                   Key (128-bit): <code>A1 C5 E1 1B 5B 4D 3C 1D E4 0D E5 16 4E 0A 1F 2B</code><br>
+                   Nonce: <code>00 01 02 03 04 05 06 07 08 09 0A 0B 00 00 00 01</code><br>
                    Toan bo payload duoc ma hoa truoc khi gui.`,
             hex: p.cipher_hex || "",
         });
@@ -544,7 +546,7 @@ function openPktModal(idx) {
             body: `HMAC = SHA256( (key XOR opad) || SHA256( (key XOR ipad) || ciphertext ) )<br>
                    Key: <code>A1 C5 E1 1B 5B 4D 3C 1D E4 0D E5 16 4E 0A 1F 2B</code><br>
                    Lay 8 byte dau cua HMAC-SHA256 lam tag, append vao cuoi payload.<br>
-                   <b>Cau truc goi cuoi: [ ETH | IP | L4 | XOR(payload) | HMAC[8] ]</b>`,
+                   <b>Cau truc goi cuoi: [ ETH | IP | L4 | AES-128-CTR(payload) | HMAC[8] ]</b>`,
         });
     } else {
         steps.push({
@@ -566,14 +568,14 @@ function openPktModal(idx) {
                    Goi <b>aic_verify_hmac(payload, len)</b>:<br>
                    1. Tinh lai HMAC tren phan ciphertext (bo 8 byte tag cuoi)<br>
                    2. So sanh voi tag: <b>KHOP</b> &#8594; goi hop le<br>
-                   3. Goi <b>aic_xor_decrypt()</b> de lay plaintext preview<br>
+                   3. Goi <b>aic_aes_ctr_decrypt()</b> de lay plaintext preview (16 byte dau)<br>
                    4. <b>tx_encrypted++</b>, log [CRYPTO] HMAC OK`
                 : `Driver nhan skb, tinh lai HMAC tren ciphertext.<br>
                    So sanh voi tag 8 byte cuoi: <b>KHONG KHOP</b><br>
                    Nguyen nhan: goi bi sua doi sau khi ma hoa (man-in-the-middle).<br>
                    <b>tx_tampered++</b>, log [SECURITY] HMAC FAIL`,
             hex: p.plain_hex || "",
-            hexLabel: isOk ? "Plaintext preview (sau XOR decrypt):" : "Ciphertext bi tamper:",
+            hexLabel: isOk ? "Plaintext preview (sau AES-128-CTR decrypt):" : "Ciphertext bi tamper:",
         });
     }
 

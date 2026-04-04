@@ -40,6 +40,8 @@
 #include <linux/ktime.h>     /* ktime_get_real_ns */
 #include <uapi/linux/sockios.h>
 #include <crypto/hash.h>     /* crypto_alloc_shash, HMAC-SHA256 */
+#include <crypto/skcipher.h> /* crypto_alloc_skcipher, AES-CTR */
+#include <linux/scatterlist.h>
 
 /* ================================================================
  * KERNEL VERSION COMPAT
@@ -137,7 +139,7 @@ struct pkt_entry {
     u8    tcp_flags;  /* SYN=0x02 ACK=0x10 FIN=0x01 RST=0x04 */
     u8    icmp_type;
     /* ★ Security fields */
-    u8    encrypted;  /* 1 = payload có XOR+HMAC tag */
+    u8    encrypted;  /* 1 = payload có AES-128-CTR+HMAC tag */
     u8    hmac_ok;    /* 1 = HMAC verify OK, 0 = FAIL/không có */
     u8    payload_hex[16]; /* 16 byte đầu của payload (ciphertext) để hiển thị */
     u8    pad[2];
@@ -175,15 +177,26 @@ struct mon_ring {
 };
 
 /* ================================================================
- * CRYPTO — XOR + HMAC-SHA256 (truncated 8 bytes)
+ * CRYPTO — AES-128-CTR + HMAC-SHA256 (truncated 8 bytes)
  *
- * Kernel không có stdlib, dùng kernel crypto API (<linux/crypto.h>)
- * cho SHA-256. XOR thì tự implement (trivial).
+ * Kernel dùng kernel crypto API (<linux/crypto.h>) cho cả AES và SHA-256.
+ * AES-128-CTR: crypto_alloc_skcipher("ctr(aes)", 0, 0)
+ * HMAC-SHA256: crypto_alloc_shash("hmac(sha256)", 0, 0)
  *
- * HMAC_KEY phải khớp với demo.c — hardcode để demo.
+ * AIC_AES_KEY và AIC_AES_NONCE phải khớp với demo.c — hardcode để demo.
+ * AIC_HMAC_KEY phải khớp với demo.c — hardcode để demo.
  * ================================================================ */
-#define AIC_XOR_KEY      0xA1
 #define AIC_HMAC_TAG_LEN 8
+
+static const u8 AIC_AES_KEY[16] = {
+    0xA1, 0xC5, 0xE1, 0x1B, 0x5B, 0x4D, 0x3C, 0x1D,
+    0xE4, 0x0D, 0xE5, 0x16, 0x4E, 0x0A, 0x1F, 0x2B
+};
+
+static const u8 AIC_AES_NONCE[16] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0A, 0x0B, 0x00, 0x00, 0x00, 0x01
+};
 
 static const u8 AIC_HMAC_KEY[16] = {
     0xA1, 0xC5, 0xE1, 0x1B, 0x5B, 0x4D, 0x3C, 0x1D,
@@ -246,10 +259,10 @@ out_free:
  * aic_verify_hmac() — Verify HMAC tag ở cuối payload
  *
  * Payload layout từ demo.c:
- *   [ XOR(data) | HMAC[8] ]
+ *   [ AES-128-CTR(data) | HMAC[8] ]
  *
  * Hàm này:
- *   1. Tính HMAC trên phần XOR(data) (không bao gồm tag)
+ *   1. Tính HMAC trên phần AES-128-CTR(data) (không bao gồm tag)
  *   2. So sánh với tag cuối payload
  *   3. Trả về true nếu khớp
  *
@@ -282,14 +295,51 @@ static bool aic_verify_hmac(const u8 *payload, size_t total_len)
 }
 
 /*
- * aic_xor_decrypt() — XOR decrypt payload (in-place, không cần alloc)
- * Symmetric: cùng hàm dùng cho encrypt và decrypt.
+ * aic_aes_ctr_decrypt() — AES-128-CTR decrypt (in-place) using kernel crypto API.
+ * Symmetric: same function used for encrypt and decrypt.
+ * Only used for the 16-byte plaintext preview log in ndo_start_xmit().
+ *
+ * Returns 0 on success, <0 on error.
  */
-static void aic_xor_decrypt(u8 *data, size_t len)
+static int aic_aes_ctr_decrypt(u8 *data, size_t len)
 {
-    size_t i;
-    for (i = 0; i < len; i++)
-        data[i] ^= AIC_XOR_KEY;
+    struct crypto_skcipher *tfm;
+    struct skcipher_request *req;
+    struct scatterlist sg;
+    DECLARE_CRYPTO_WAIT(wait);
+    u8 iv[16];
+    int ret;
+
+    tfm = crypto_alloc_skcipher("ctr(aes)", 0, 0);
+    if (IS_ERR(tfm)) {
+        pr_warn_once(AIC_TAG "ctr(aes) not available, skipping decrypt preview\n");
+        return PTR_ERR(tfm);
+    }
+
+    ret = crypto_skcipher_setkey(tfm, AIC_AES_KEY, sizeof(AIC_AES_KEY));
+    if (ret)
+        goto out_free_tfm;
+
+    req = skcipher_request_alloc(tfm, GFP_ATOMIC);
+    if (!req) {
+        ret = -ENOMEM;
+        goto out_free_tfm;
+    }
+
+    /* IV = nonce (CTR mode uses IV as initial counter block) */
+    memcpy(iv, AIC_AES_NONCE, sizeof(iv));
+
+    sg_init_one(&sg, data, len);
+    skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+                                  crypto_req_done, &wait);
+    skcipher_request_set_crypt(req, &sg, &sg, len, iv);
+
+    ret = crypto_wait_req(crypto_skcipher_decrypt(req), &wait);
+
+    skcipher_request_free(req);
+out_free_tfm:
+    crypto_free_skcipher(tfm);
+    return ret;
 }
 
 /* ================================================================
@@ -1056,15 +1106,17 @@ log_it:
                 alog_ok("[CRYPTO] TX #%llu HMAC OK — gói hợp lệ, payload=%zuB",
                         seq, payload_len);
 
-                /* Decrypt để log plaintext (chỉ 16 byte đầu) */
+                /* AES-128-CTR decrypt để log plaintext (chỉ 16 byte đầu) */
                 {
                     u8 plain_preview[16];
                     size_t data_len = payload_len - AIC_HMAC_TAG_LEN;
                     size_t preview  = data_len < 16 ? data_len : 16;
                     memcpy(plain_preview, payload_start, preview);
-                    aic_xor_decrypt(plain_preview, preview);
-                    alog("  [CRYPTO]   plaintext[0..%zu]: %*phN",
-                         preview - 1, (int)preview, plain_preview);
+                    if (aic_aes_ctr_decrypt(plain_preview, preview) == 0)
+                        alog("  [CRYPTO]   AES-128-CTR plaintext[0..%zu]: %*phN",
+                             preview - 1, (int)preview, plain_preview);
+                    else
+                        alog("  [CRYPTO]   AES-128-CTR decrypt unavailable");
                 }
             } else {
                 atomic64_inc(&priv->stats.tx_tampered);

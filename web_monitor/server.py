@@ -136,7 +136,7 @@ def get_security_events(n=80):
     )
     events = []
 
-    crypto_kw = ["hmac", "crypto", "security", "tamper", "encrypt", "plain", "cipher", "xor"]
+    crypto_kw = ["hmac", "crypto", "security", "tamper", "encrypt", "plain", "cipher", "xor", "aes", "ctr"]
     raw_crypto = [l for l in all_aic if any(k in l.lower() for k in crypto_kw)]
     # ARP: dmesg log la "ARP" viet hoa, vi du: "[TX #1   ] ARP bytes=42"
     arp_lines  = [l for l in all_aic if " ARP " in l and "TX #" in l
