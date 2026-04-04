@@ -559,99 +559,116 @@ def _parse_demo_stdout(stdout: str) -> list:
 @app.route("/api/raw_packets")
 def api_raw_packets():
     """
-    Tra ve raw cipher+tag hex dump tu dmesg (sau server start).
-    Parse cac dong co hex dump tu driver log: [CRYPTO] va [SECURITY].
-    Ket hop voi TX log de biet proto/seq.
+    Two-pass parse:
+    Pass 1 - build pkt_map from [TX #N] lines (these always exist).
+    Pass 2 - assign hmac_ok/tampered by matching TX #N in HMAC log lines.
+    This fixes the ordering issue: HMAC log appears BEFORE [TX #N] line in dmesg.
     """
     r = run_cmd(["dmesg"])
     all_aic = dmesg_since_start(
         [l for l in r["stdout"].splitlines() if "aicsemi" in l]
     )
 
-    packets = []
-    # Reuse api_packet_log logic but also grab cipher/plain hex from dmesg
-    pkt_map = {}   # seq -> dict
+    pkt_map = {}
     order   = []
 
+    # ── Pass 1: build skeleton from TX lines ─────────────────
     for line in all_aic:
-        lo   = line.lower()
-        ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
-        ts   = ts_m.group(1) if ts_m else ""
-        msg  = re.sub(r"^\[.*?\]\s*\[aicsemi\]\s*", "", line, flags=re.IGNORECASE).strip()
-
         tx_m = re.search(r"\[TX #(\d+)\s*\]", line)
-        if tx_m:
-            seq = int(tx_m.group(1))
-            proto = "Unknown"
-            for p in ["IPv4 / TCP","IPv4 / UDP","IPv4 / DNS","IPv4 / ICMP","IPv6","ARP","IPv4"]:
-                if p in line: proto = p; break
-            bytes_m = re.search(r"bytes=(\d+)", line)
-            pkt_map[seq] = {
-                "seq": seq, "proto": proto, "ts": ts,
-                "bytes": int(bytes_m.group(1)) if bytes_m else 0,
-                "plain_text": "", "cipher_hex": "", "hmac_tag": "",
-                "full_hex": "", "tampered": False,
-                "hmac_ok": False, "src_ip": "", "dst_ip": "",
-            }
-            order.append(seq)
+        if not tx_m:
             continue
+        seq = int(tx_m.group(1))
+        if seq in pkt_map:
+            continue
+        proto = "Unknown"
+        for p in ["IPv4 / TCP","IPv4 / UDP","IPv4 / DNS","IPv4 / ICMP","IPv6","ARP","IPv4"]:
+            if p in line: proto = p; break
+        bytes_m = re.search(r"bytes=(\d+)", line)
+        ts_m    = re.search(r"\[\s*(\d+\.\d+)\]", line)
+        pkt_map[seq] = {
+            "seq": seq, "proto": proto,
+            "ts":  ts_m.group(1) if ts_m else "",
+            "bytes": int(bytes_m.group(1)) if bytes_m else 0,
+            "plain_text": "", "cipher_hex": "", "hmac_tag": "",
+            "full_hex": "", "tampered": False,
+            "hmac_ok": False, "src_ip": "", "dst_ip": "",
+        }
+        order.append(seq)
 
-        # IP detail
-        ip_m = re.search(r"(\d+\.\d+\.\d+\.\d+).*?(\d+\.\d+\.\d+\.\d+)", line)
-        if ip_m and order and not pkt_map[order[-1]]["src_ip"]:
-            pkt_map[order[-1]]["src_ip"] = ip_m.group(1)
-            pkt_map[order[-1]]["dst_ip"] = ip_m.group(2)
+    # ── Pass 2: assign status and hex from all lines ──────────
+    last_crypto_seq = None
 
-        # HMAC OK — extract plaintext hex from next line
-        if "hmac ok" in lo and "tx #" in lo:
-            seq_m = re.search(r"tx #(\d+)", lo)
+    for line in all_aic:
+        lo = line.lower()
+
+        # HMAC OK: "✓ [CRYPTO] TX #N HMAC OK"
+        if "hmac ok" in lo:
+            seq_m = re.search(r"tx\s*#\s*(\d+)", lo)
             if seq_m:
                 s = int(seq_m.group(1))
                 if s in pkt_map:
                     pkt_map[s]["hmac_ok"] = True
+                    last_crypto_seq = s
+            continue
 
-        # HMAC FAIL
-        elif "hmac fail" in lo and "tx #" in lo:
-            seq_m = re.search(r"tx #(\d+)", lo)
+        # HMAC FAIL: "✗ [SECURITY] TX #N HMAC FAIL"
+        if "hmac fail" in lo:
+            seq_m = re.search(r"tx\s*#\s*(\d+)", lo)
             if seq_m:
                 s = int(seq_m.group(1))
                 if s in pkt_map:
                     pkt_map[s]["tampered"] = True
+                    last_crypto_seq = s
+            continue
 
-        # Plaintext preview hex (after AES-CTR decrypt)
-        elif "plaintext" in lo:
+        # Plaintext preview — belongs to last_crypto_seq
+        if "plaintext" in lo and last_crypto_seq is not None:
             hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
-            if hex_m and order:
-                pkt_map[order[-1]]["plain_text"] = hex_m[0]
+            if hex_m:
+                pkt_map[last_crypto_seq]["plain_text"] = hex_m[0]
+            continue
 
-        # Ciphertext hex
-        elif "ciphertext" in lo:
+        # Ciphertext hex — belongs to last_crypto_seq
+        if "ciphertext" in lo and last_crypto_seq is not None:
             hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
-            if hex_m and order:
-                raw = hex_m[0]
+            if hex_m:
+                raw   = hex_m[0]
                 parts = raw.split()
                 tag_b = parts[-8:] if len(parts) >= 8 else []
                 ct_b  = parts[:-8] if len(parts) >= 8 else parts
-                pkt_map[order[-1]]["cipher_hex"] = " ".join(ct_b)
-                pkt_map[order[-1]]["hmac_tag"]   = " ".join(tag_b)
-                pkt_map[order[-1]]["full_hex"]   = raw
+                pkt_map[last_crypto_seq]["cipher_hex"] = " ".join(ct_b)
+                pkt_map[last_crypto_seq]["hmac_tag"]   = " ".join(tag_b)
+                pkt_map[last_crypto_seq]["full_hex"]   = raw
+            continue
 
-    # Also try to get hex from demo stdout if available
+        # IP detail line — attach to nearest preceding TX packet
+        ip_m = re.search(r"(\d+\.\d+\.\d+\.\d+).*?(\d+\.\d+\.\d+\.\d+)", line)
+        if ip_m and "[TX #" not in line and order:
+            ts_m = re.search(r"\[\s*(\d+\.\d+)\]", line)
+            if ts_m:
+                cur_ts = float(ts_m.group(1))
+                for s in reversed(order):
+                    if pkt_map[s]["ts"] and float(pkt_map[s]["ts"]) <= cur_ts:
+                        if not pkt_map[s]["src_ip"]:
+                            pkt_map[s]["src_ip"] = ip_m.group(1)
+                            pkt_map[s]["dst_ip"] = ip_m.group(2)
+                        break
+
+    # ── Merge stdout hex if available ────────────────────────
     with _LAST_DEMO_LOCK:
         stdout = _LAST_DEMO_STDOUT
     if stdout:
-        stdout_pkts = _parse_demo_stdout(stdout)
-        # Merge: match by order index
-        for i, sp in enumerate(stdout_pkts):
+        for i, sp in enumerate(_parse_demo_stdout(stdout)):
             if i < len(order):
                 s = order[i]
                 if not pkt_map[s]["full_hex"] and sp.get("full_hex"):
                     pkt_map[s]["cipher_hex"] = sp["cipher_hex"]
                     pkt_map[s]["hmac_tag"]   = sp["hmac_tag"]
                     pkt_map[s]["full_hex"]   = sp["full_hex"]
-                    pkt_map[s]["tampered"]   = sp["tampered"]
+                if sp.get("tampered"):
+                    pkt_map[s]["tampered"] = True
 
-    result = [pkt_map[s] for s in order if s in pkt_map and pkt_map[s]["bytes"] > 0]
+    result = [pkt_map[s] for s in order if s in pkt_map]
     return jsonify({"packets": result, "total": len(result)})
 
 
