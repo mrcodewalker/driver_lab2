@@ -628,8 +628,9 @@ def api_raw_packets():
                 pkt_map[last_crypto_seq]["plain_text"] = hex_m[0]
             continue
 
-        # Ciphertext hex — belongs to last_crypto_seq
-        if "ciphertext" in lo and last_crypto_seq is not None:
+        # Ciphertext+tag hex — "ciphertext+tag[0..N]: xx xx ..."
+        # Appears for both HMAC OK and HMAC FAIL packets
+        if "ciphertext+tag" in lo and last_crypto_seq is not None:
             hex_m = re.findall(r"[0-9a-f]{2}(?:\s[0-9a-f]{2}){3,}", line)
             if hex_m:
                 raw   = hex_m[0]

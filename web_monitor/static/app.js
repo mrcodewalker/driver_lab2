@@ -774,82 +774,120 @@ function renderRawPackets(pkts, note) {
 function openRawModal(idx) {
     const p = _rawPackets[idx]; if (!p) return;
     const isTamp = p.tampered;
+    const isOk = p.hmac_ok && !isTamp;
+    const isPlain = !isOk && !isTamp;
 
+    const statusHtml = isTamp
+        ? `<span style="color:var(--red)">&#128680; TAMPERED</span>`
+        : isOk ? `<span style="color:var(--green)">&#128272; HMAC OK</span>`
+            : `<span style="color:var(--yellow)">&#128228; PLAIN</span>`;
     document.getElementById("raw-modal-title").innerHTML =
-        `&#128190; #${p.seq} ${escHtml(p.proto)} — Raw Hex Dump`;
+        `&#128190; #${p.seq} ${escHtml(p.proto)} — ${statusHtml}`;
 
-    // Format hex into rows of 16 bytes with offset + ascii
-    function hexRows(hexStr, label, color) {
-        const bytes = hexStr.split(" ").filter(Boolean);
-        if (!bytes.length) return "";
-        let rows = "";
+    // ── Per-byte colored hex dump ─────────────────────────────
+    // tagStart = index of first HMAC tag byte (last 8 bytes)
+    function buildHexDump(bytes, tagStart, redTag) {
+        if (!bytes.length) return `<div style="color:var(--text-muted);padding:8px">Không có dữ liệu</div>`;
+        let html = "";
         for (let i = 0; i < bytes.length; i += 16) {
             const chunk = bytes.slice(i, i + 16);
             const offset = i.toString(16).padStart(4, "0");
-            const hex = chunk.map(b => b.padStart(2, "0")).join(" ").padEnd(47, " ");
-            const ascii = chunk.map(b => {
+            let hexPart = "", ascPart = "";
+            chunk.forEach((b, j) => {
+                const abs = i + j;
+                const isTag = abs >= tagStart;
+                const col = isTag ? (redTag ? "var(--red)" : "var(--green)") : "var(--cyan)";
+                const glow = isTag && redTag
+                    ? "text-shadow:0 0 8px #ef4444,0 0 18px rgba(239,68,68,.5)"
+                    : isTag ? "text-shadow:0 0 5px rgba(16,185,129,.6)" : "";
+                const bg = isTag && redTag
+                    ? "background:rgba(239,68,68,.18);border-radius:2px;padding:0 1px;margin:0 1px" : "";
+                hexPart += `<span style="color:${col};${glow};${bg}">${b}</span> `;
                 const c = parseInt(b, 16);
-                return c >= 32 && c < 127 ? String.fromCharCode(c) : ".";
-            }).join("");
-            rows += `<div class="hex-row"><span class="hex-off">${offset}</span>  <span style="color:${color}">${escHtml(hex)}</span>  <span class="hex-asc">${escHtml(ascii)}</span></div>`;
+                const ch = c >= 32 && c < 127 ? escHtml(String.fromCharCode(c)) : ".";
+                ascPart += `<span style="color:${col}">${ch}</span>`;
+            });
+            // pad to 16 cols
+            for (let k = chunk.length; k < 16; k++) hexPart += "   ";
+            html += `<div class="hex-row">
+                <span class="hex-off">${offset}</span>
+                <span class="hex-bytes">${hexPart}</span>
+                <span class="hex-asc">${ascPart}</span>
+            </div>`;
         }
-        return `<div style="margin-bottom:4px;font-size:10px;font-weight:600;color:var(--text-secondary)">${label}</div>${rows}`;
+        return html;
     }
 
-    const ctRows = hexRows(p.cipher_hex, "Ciphertext (AES-128-CTR encrypted payload):", "#58a6ff");
-    const tagRows = hexRows(p.hmac_tag, "HMAC-SHA256 Tag (8 bytes truncated):", isTamp ? "#f85149" : "#3fb950");
-    const fullRows = hexRows(p.full_hex, "Full payload = ciphertext + HMAC tag:", "#94a3b8");
+    const hasHex = p.full_hex && p.full_hex.trim().length > 0;
+    const allBytes = hasHex ? p.full_hex.split(" ").filter(Boolean) : [];
+    const tagStart = allBytes.length - 8;
 
-    document.getElementById("raw-modal-body").innerHTML = `
+    const hexDumpHtml = hasHex ? `
         <div class="modal-section">
-            <div class="modal-section-title">Thong tin goi</div>
-            <div class="modal-field ${isTamp ? "fail" : p.hmac_ok ? "ok" : "info"}" style="font-size:12px;line-height:2;font-family:var(--font-sans)">
-                Protocol  : <b style="color:var(--cyan)">${escHtml(p.proto)}</b><br>
-                ${p.src_ip ? `Src → Dst : <b>${escHtml(p.src_ip)}</b> → <b>${escHtml(p.dst_ip)}</b><br>` : ""}
-                Size      : <b>${p.bytes} bytes</b> (frame total)<br>
-                Payload   : <b>${p.full_hex ? p.full_hex.split(" ").filter(Boolean).length : 0} bytes</b>
-                            (${p.cipher_hex ? p.cipher_hex.split(" ").filter(Boolean).length : 0}B cipher
-                            + ${p.hmac_tag ? p.hmac_tag.split(" ").filter(Boolean).length : 0}B HMAC tag)<br>
-                Status    : ${isTamp
-            ? '<b style="color:var(--red)">&#128680; TAMPERED — HMAC tag bị sửa đổi cố ý</b>'
-            : p.hmac_ok
-                ? '<b style="color:var(--green)">&#128272; HMAC OK — gói hợp lệ</b>'
-                : '<b style="color:var(--yellow)">&#128228; PLAIN — ARP/không có payload (bình thường)</b>'}
+            <div class="modal-section-title">
+                Hex dump — ${allBytes.length} bytes
+                ${isTamp ? `<span style="color:var(--red);font-size:11px;margin-left:8px;font-weight:600">
+                    ⚠ Byte đỏ phát sáng = HMAC tag bị flip (byte #${tagStart + 3} XOR 0xFF)</span>` : ""}
             </div>
-        </div>
-        ${(p.full_hex && p.full_hex.trim()) ? `
-        <div class="modal-section">
-            <div class="modal-section-title">Hex dump chi tiet</div>
             <div class="hex-dump-box">
                 <div class="hex-header">
                     <span class="hex-off">OFFS</span>
-                    <span style="color:var(--text-muted)">  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f</span>
-                    <span class="hex-asc" style="margin-left:8px">ASCII</span>
+                    <span class="hex-bytes" style="color:var(--text-muted)">00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f</span>
+                    <span class="hex-asc" style="color:var(--text-muted)">ASCII</span>
                 </div>
-                ${ctRows}
-                <div style="border-top:1px dashed var(--border);margin:6px 0;font-size:10px;color:var(--text-muted);text-align:center">── HMAC-SHA256 tag (8 bytes) ──</div>
-                ${tagRows}
+                ${buildHexDump(allBytes, tagStart, isTamp)}
+            </div>
+            <div style="margin-top:7px;display:flex;gap:16px;font-size:10px;font-family:var(--font-mono)">
+                <span><span style="color:var(--cyan)">■</span> Ciphertext (AES-128-CTR)</span>
+                <span><span style="color:${isTamp ? "var(--red)" : "var(--green)"}"${isTamp ? ' style="text-shadow:0 0 6px var(--red)"' : ""}>■</span>
+                    HMAC-SHA256 tag (8B)${isTamp ? " — <b style='color:var(--red)'>TAMPERED</b>" : " — valid"}</span>
+            </div>
+        </div>` : "";
+
+    const plaintextHtml = (p.plain_text && p.plain_text.trim()) ? `
+        <div class="modal-section">
+            <div class="modal-section-title">Plaintext preview (sau AES-128-CTR decrypt)</div>
+            <div class="hex-dump-box">
+                ${buildHexDump(p.plain_text.split(" ").filter(Boolean), 999, false)}
+            </div>
+        </div>` : "";
+
+    document.getElementById("raw-modal-body").innerHTML = `
+        <div class="modal-section">
+            <div class="modal-section-title">Thông tin gói</div>
+            <div class="modal-field ${isTamp ? "fail" : isOk ? "ok" : "info"}"
+                 style="font-size:12px;line-height:2;font-family:var(--font-sans)">
+                Protocol  : <b style="color:var(--cyan)">${escHtml(p.proto)}</b><br>
+                ${p.src_ip ? `Src → Dst : <b>${escHtml(p.src_ip)}</b> → <b>${escHtml(p.dst_ip)}</b><br>` : ""}
+                Frame     : <b>${p.bytes} bytes</b> &nbsp;|&nbsp;
+                Payload   : <b>${allBytes.length} bytes</b>
+                = <span style="color:var(--cyan)">${Math.max(0, allBytes.length - 8)}B cipher</span>
+                + <span style="color:${isTamp ? "var(--red)" : "var(--green)"}">8B HMAC tag</span><br>
+                Status    : ${isTamp
+            ? '<b style="color:var(--red)">&#128680; TAMPERED — HMAC tag bị flip byte[3] XOR 0xFF</b>'
+            : isOk
+                ? '<b style="color:var(--green)">&#128272; HMAC OK — gói toàn vẹn</b>'
+                : '<b style="color:var(--yellow)">&#128228; PLAIN — ARP, không có payload</b>'}
             </div>
         </div>
-        <div class="modal-section">
-            <div class="modal-section-title">Full payload (ciphertext + tag)</div>
-            <div class="hex-dump-box">${fullRows}</div>
-        </div>` : `
+        ${hexDumpHtml}
+        ${plaintextHtml}
+        ${isPlain ? `
         <div class="modal-section">
             <div class="modal-field info" style="font-family:var(--font-sans);font-size:12px">
-                &#128228; Gói ARP không có application payload — không mã hóa, không có HMAC tag.<br>
-                Driver đếm vào <b>tx_plain++</b> và bỏ qua verify.
+                &#128228; ARP packet không có application payload — không mã hóa, không HMAC.<br>
+                Driver đếm vào <b>tx_plain++</b>.
             </div>
-        </div>`}
+        </div>` : ""}
         <div class="modal-section">
-            <div class="modal-section-title">Giai thich cau truc</div>
+            <div class="modal-section-title">Cấu trúc gói</div>
             <div class="modal-field info" style="font-family:var(--font-sans);font-size:11px;line-height:1.9;color:var(--text-secondary)">
-                <b style="color:var(--blue)">Cau truc goi day du:</b><br>
-                [ ETH (14B) | IP (20B) | L4 header | <span style="color:#58a6ff">AES-128-CTR(payload)</span> | <span style="color:${isTamp ? "#f85149" : "#3fb950"}">HMAC[8]</span> ]<br><br>
-                AES-128-CTR key : <code style="color:var(--cyan)">2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c</code><br>
-                AES nonce       : <code style="color:var(--cyan)">f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 fa fb 00 00 00 01</code><br>
-                HMAC-SHA256 key : <code style="color:var(--purple)">60 3d eb 10 15 ca 71 be 2b 73 ae f0 85 7d 77 81 ...</code><br>
-                HMAC tính trên  : ciphertext (Encrypt-then-MAC model)
+                [ ETH (14B) | IP (20B) | L4 header |
+                <span style="color:#58a6ff">AES-128-CTR(payload)</span> |
+                <span style="color:${isTamp ? "#f85149" : "#3fb950"}"${isTamp ? ' style="text-shadow:0 0 6px #ef4444"' : ""}>HMAC[8]${isTamp ? " ← BỊ SỬA" : ""}</span> ]<br>
+                AES key  : <code style="color:var(--cyan)">2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c</code><br>
+                Nonce    : <code style="color:var(--cyan)">f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 fa fb 00 00 00 01</code><br>
+                HMAC key : <code style="color:var(--purple)">60 3d eb 10 15 ca 71 be ... (256-bit, độc lập với AES key)</code>
             </div>
         </div>`;
 

@@ -1555,3 +1555,12 @@ select.inp {
     white-space: nowrap;
     opacity: .8;
 }
+
+/* hex-bytes column in hex dump rows */
+.hex-bytes {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .3px;
+    min-width: 300px;
+    flex-shrink: 0;
+}

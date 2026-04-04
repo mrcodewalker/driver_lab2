@@ -1116,6 +1116,13 @@ log_it:
                 alog_ok("[CRYPTO] TX #%llu HMAC OK — gói hợp lệ, payload=%zuB",
                         seq, payload_len);
 
+                /* Log full ciphertext+tag hex (tối đa 32 byte) để web hiển thị */
+                {
+                    size_t dump_n = payload_len < 32 ? payload_len : 32;
+                    alog("  [CRYPTO]   ciphertext+tag[0..%zu]: %*phN",
+                         dump_n - 1, (int)dump_n, payload_start);
+                }
+
                 /* AES-128-CTR decrypt để log plaintext (chỉ 16 byte đầu) */
                 {
                     u8 plain_preview[16];
@@ -1132,8 +1139,13 @@ log_it:
                 atomic64_inc(&priv->stats.tx_tampered);
                 alog_err("[SECURITY] TX #%llu HMAC FAIL — gói bị TAMPER! payload=%zuB",
                          seq, payload_len);
-                alog_err("[SECURITY]   Ciphertext[0..7]: %*phN",
-                         8, payload_start);
+
+                /* Log full ciphertext+tag hex (tối đa 32 byte) — HMAC tag là 8 byte cuối */
+                {
+                    size_t dump_n = payload_len < 32 ? payload_len : 32;
+                    alog_err("[SECURITY]   ciphertext+tag[0..%zu]: %*phN",
+                             dump_n - 1, (int)dump_n, payload_start);
+                }
                 /* Không drop — vẫn đếm nhưng đánh dấu tampered */
             }
         } else {
