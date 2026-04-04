@@ -698,16 +698,38 @@ function renderRawPackets(pkts, note) {
     const box = document.getElementById("raw-pkt-list");
     if (!box) return;
     const countEl = document.getElementById("raw-pkt-count");
-    if (countEl) countEl.textContent = pkts.length ? `${pkts.length} gói` : "";
+
     if (pkts.length === 0) {
+        if (countEl) countEl.textContent = "";
         box.innerHTML = `<div class="sec-empty">${escHtml(note || "Chưa có dữ liệu — chạy Run Demo")}</div>`;
         return;
     }
-    box.innerHTML = pkts.map((p, idx) => {
+
+    // Summary counts
+    const nOk = pkts.filter(p => p.hmac_ok && !p.tampered).length;
+    const nTamp = pkts.filter(p => p.tampered).length;
+    const nPlain = pkts.filter(p => !p.hmac_ok && !p.tampered).length;
+    if (countEl) countEl.textContent = `${pkts.length} gói`;
+
+    // Summary bar
+    const summaryHtml = `
+        <div class="raw-summary">
+            <span class="raw-sum-item ok">&#128272; ${nOk} HMAC OK</span>
+            <span class="raw-sum-item tamper">&#128680; ${nTamp} TAMPERED</span>
+            <span class="raw-sum-item plain">&#128228; ${nPlain} Plain (ARP)</span>
+        </div>`;
+
+    // Rows — grid: status-badge | seq | proto | src→dst | bytes | hmac-tag-preview
+    const rowsHtml = pkts.map((p, idx) => {
         const isTamp = p.tampered;
-        const isOk = p.hmac_ok;
-        const cls = isTamp ? "tamper" : isOk ? "ok" : "none";
-        const icon = isTamp ? "&#128680;" : isOk ? "&#128272;" : "&#128190;";
+        const isOk = p.hmac_ok && !isTamp;
+        const isPlain = !isOk && !isTamp;
+
+        const statusCls = isTamp ? "tamper" : isOk ? "ok" : "plain-row";
+        const statusIcon = isTamp ? "&#128680;" : isOk ? "&#128272;" : "&#128228;";
+        const statusLbl = isTamp ? "TAMPER" : isOk ? "OK" : "PLAIN";
+        const statusCol = isTamp ? "var(--red)" : isOk ? "var(--green)" : "var(--yellow)";
+
         const protoLo = (p.proto || "").toLowerCase();
         const protoCls = protoLo.includes("tcp") ? "tcp"
             : protoLo.includes("udp") || protoLo.includes("dns") ? "udp"
@@ -718,19 +740,34 @@ function renderRawPackets(pkts, note) {
                 : protoLo.includes("udp") ? "UDP"
                     : protoLo.includes("icmp") ? "ICMP"
                         : protoLo.includes("arp") ? "ARP" : "PKT";
+
+        // Info column: src→dst or hex preview
         const hasHex = p.full_hex && p.full_hex.trim().length > 0;
-        const hexPreview = hasHex
-            ? p.full_hex.split(" ").slice(0, 10).join(" ") + (p.full_hex.split(" ").length > 10 ? " ..." : "")
-            : (p.src_ip ? `${p.src_ip} → ${p.dst_ip}` : "no hex — xem dmesg");
-        const hmacTxt = isTamp ? "FAIL" : isOk ? "OK" : "--";
-        return `<div class="pkt-row ${cls}" onclick="openRawModal(${idx})" title="Click xem full hex dump + chi tiet ma hoa">
-            <div class="pkt-seq">${icon} #${p.seq}</div>
-            <div class="pkt-proto ${protoCls}">${protoShort}</div>
-            <div class="pkt-info" style="font-family:var(--font-mono);font-size:10px">${escHtml(hexPreview)}</div>
-            <div class="pkt-bytes">${p.bytes}B</div>
-            <div class="pkt-hmac ${cls}">${hmacTxt}</div>
+        const infoTxt = p.src_ip && p.dst_ip
+            ? `${p.src_ip} → ${p.dst_ip}`
+            : hasHex
+                ? p.full_hex.split(" ").slice(0, 8).join(" ") + " ..."
+                : isPlain ? "(no payload — ARP)" : "no hex";
+
+        // HMAC tag preview (last 8 bytes of full_hex)
+        const tagPreview = hasHex
+            ? p.full_hex.split(" ").slice(-8).join(" ")
+            : "—";
+
+        return `<div class="raw-row ${statusCls}" onclick="openRawModal(${idx})" title="Click xem full hex dump">
+            <div class="raw-status" style="color:${statusCol}">
+                <span class="raw-status-icon">${statusIcon}</span>
+                <span class="raw-status-lbl">${statusLbl}</span>
+            </div>
+            <div class="raw-seq">#${p.seq}</div>
+            <div class="pkt-proto ${protoCls}" style="min-width:36px">${protoShort}</div>
+            <div class="raw-info">${escHtml(infoTxt)}</div>
+            <div class="raw-bytes">${p.bytes}B</div>
+            <div class="raw-tag" style="color:${statusCol}">${escHtml(tagPreview)}</div>
         </div>`;
     }).join("");
+
+    box.innerHTML = summaryHtml + rowsHtml;
 }
 
 
@@ -766,16 +803,21 @@ function openRawModal(idx) {
     document.getElementById("raw-modal-body").innerHTML = `
         <div class="modal-section">
             <div class="modal-section-title">Thong tin goi</div>
-            <div class="modal-field info" style="font-size:12px;line-height:2">
-                Protocol : <b style="color:var(--cyan)">${escHtml(p.proto)}</b><br>
-                Plaintext: <b style="color:var(--green)">"${escHtml(p.plain_text || "(ARP/no payload)")}"</b><br>
-                Total    : <b>${p.full_hex.split(" ").filter(Boolean).length} bytes</b>
-                (${p.cipher_hex.split(" ").filter(Boolean).length}B cipher + 8B HMAC tag)<br>
-                Status   : ${isTamp
-            ? '<b style="color:var(--red)">&#128680; TAMPERED — HMAC tag bi sua doi co y</b>'
-            : '<b style="color:var(--green)">&#128272; HMAC OK — goi hop le</b>'}
+            <div class="modal-field ${isTamp ? "fail" : p.hmac_ok ? "ok" : "info"}" style="font-size:12px;line-height:2;font-family:var(--font-sans)">
+                Protocol  : <b style="color:var(--cyan)">${escHtml(p.proto)}</b><br>
+                ${p.src_ip ? `Src → Dst : <b>${escHtml(p.src_ip)}</b> → <b>${escHtml(p.dst_ip)}</b><br>` : ""}
+                Size      : <b>${p.bytes} bytes</b> (frame total)<br>
+                Payload   : <b>${p.full_hex ? p.full_hex.split(" ").filter(Boolean).length : 0} bytes</b>
+                            (${p.cipher_hex ? p.cipher_hex.split(" ").filter(Boolean).length : 0}B cipher
+                            + ${p.hmac_tag ? p.hmac_tag.split(" ").filter(Boolean).length : 0}B HMAC tag)<br>
+                Status    : ${isTamp
+            ? '<b style="color:var(--red)">&#128680; TAMPERED — HMAC tag bị sửa đổi cố ý</b>'
+            : p.hmac_ok
+                ? '<b style="color:var(--green)">&#128272; HMAC OK — gói hợp lệ</b>'
+                : '<b style="color:var(--yellow)">&#128228; PLAIN — ARP/không có payload (bình thường)</b>'}
             </div>
         </div>
+        ${(p.full_hex && p.full_hex.trim()) ? `
         <div class="modal-section">
             <div class="modal-section-title">Hex dump chi tiet</div>
             <div class="hex-dump-box">
@@ -785,14 +827,20 @@ function openRawModal(idx) {
                     <span class="hex-asc" style="margin-left:8px">ASCII</span>
                 </div>
                 ${ctRows}
-                <div style="border-top:1px dashed var(--border);margin:6px 0"></div>
+                <div style="border-top:1px dashed var(--border);margin:6px 0;font-size:10px;color:var(--text-muted);text-align:center">── HMAC-SHA256 tag (8 bytes) ──</div>
                 ${tagRows}
             </div>
         </div>
         <div class="modal-section">
             <div class="modal-section-title">Full payload (ciphertext + tag)</div>
             <div class="hex-dump-box">${fullRows}</div>
-        </div>
+        </div>` : `
+        <div class="modal-section">
+            <div class="modal-field info" style="font-family:var(--font-sans);font-size:12px">
+                &#128228; Gói ARP không có application payload — không mã hóa, không có HMAC tag.<br>
+                Driver đếm vào <b>tx_plain++</b> và bỏ qua verify.
+            </div>
+        </div>`}
         <div class="modal-section">
             <div class="modal-section-title">Giai thich cau truc</div>
             <div class="modal-field info" style="font-family:var(--font-sans);font-size:11px;line-height:1.9;color:var(--text-secondary)">
