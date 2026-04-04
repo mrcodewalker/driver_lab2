@@ -340,6 +340,8 @@ def action_crypto_ping():
 
     uptime_before = get_uptime_seconds()
     r = run_cmd([demo_path, iface], timeout=35)
+    with _LAST_DEMO_LOCK:
+        _LAST_DEMO_STDOUT = r.get("stdout", "")
     time.sleep(0.8)   # cho driver log ra dmesg
 
     dmesg_r = run_cmd(["dmesg"])
@@ -365,8 +367,12 @@ def action_crypto_ping():
 
 @app.route("/api/action/demo", methods=["POST"])
 def action_demo():
+    global _LAST_DEMO_STDOUT
     push_log("=== ./demo ===")
-    return jsonify(run_cmd(["./demo"], timeout=35))
+    r = run_cmd(["./demo"], timeout=35)
+    with _LAST_DEMO_LOCK:
+        _LAST_DEMO_STDOUT = r.get("stdout", "")
+    return jsonify(r)
 
 @app.route("/api/packet_log")
 def api_packet_log():
@@ -480,11 +486,86 @@ def api_packet_log():
     result = [packets[s] for s in order if s in packets]
     return jsonify({"packets": result, "total": len(result)})
 
+@app.route("/api/crypto_keys")
+def api_crypto_keys():
+    """
+    Tra ve cac key dang duoc su dung trong du an (hardcode demo).
+    AES_KEY (128-bit) va HMAC_KEY (256-bit) la hai khoa doc lap nhau.
+    """
+    return jsonify({
+        "aes_key":   "2b7e151628aed2a6abf7158809cf4f3c",
+        "aes_nonce": "f0f1f2f3f4f5f6f7f8f9fafb00000001",
+        "hmac_key":  "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+        "aes_bits":  128,
+        "hmac_bits": 256,
+        "mode":      "AES-128-CTR + HMAC-SHA256 (Encrypt-then-MAC)",
+        "tag_len":   8,
+        "note":      "AES_KEY va HMAC_KEY la hai khoa doc lap — best practice Encrypt-then-MAC"
+    })
+
 @app.route("/api/action/clear_ring", methods=["POST"])
 def action_clear_ring():
     if os.path.exists(os.path.join(DRIVER_DIR,"ioctl_test")):
         return jsonify(run_cmd(["./ioctl_test","aic0"]))
     return jsonify({"ok":False,"stderr":"ioctl_test not built"})
+
+# ── Raw packet capture from demo stdout ──────────────────────
+_LAST_DEMO_STDOUT = ""
+_LAST_DEMO_LOCK   = threading.Lock()
+
+def _parse_demo_stdout(stdout: str) -> list:
+    """
+    Parse stdout cua ./demo de lay raw cipher+tag hex dump cho tung goi.
+    demo.c in ra:
+        plain  : "AIC-Ping-001-SECRET"
+        cipher+tag:  e3 4f 2a ...
+    """
+    packets = []
+    seq = 0
+    lines = stdout.splitlines()
+    current_plain = ""
+    current_proto = "Unknown"
+    proto_hints = {
+        "ICMP+ENC": "IPv4 / ICMP", "TCP+ENC": "IPv4 / TCP",
+        "DNS+ENC": "IPv4 / UDP",   "TAMPERED": "IPv4 / ICMP (TAMPERED)",
+    }
+    for line in lines:
+        for tag, proto in proto_hints.items():
+            if tag in line:
+                current_proto = proto
+                break
+        pm = re.search(r'plain\s*:\s*"([^"]+)"', line)
+        if pm:
+            current_plain = pm.group(1)
+        hm = re.search(r'(?:cipher\+tag|tampered)\s*:\s+((?:[0-9a-f]{2}\s*)+)', line, re.IGNORECASE)
+        if hm:
+            seq += 1
+            raw_hex = hm.group(1).strip()
+            parts   = raw_hex.split()
+            tag_b   = parts[-8:] if len(parts) >= 8 else []
+            ct_b    = parts[:-8] if len(parts) >= 8 else parts
+            packets.append({
+                "seq":        seq,
+                "proto":      current_proto,
+                "plain_text": current_plain,
+                "cipher_hex": " ".join(ct_b),
+                "hmac_tag":   " ".join(tag_b),
+                "full_hex":   raw_hex,
+                "tampered":   "TAMPERED" in current_proto,
+            })
+            current_plain = ""
+    return packets
+
+@app.route("/api/raw_packets")
+def api_raw_packets():
+    """Tra ve raw cipher+tag hex dump tu lan chay demo gan nhat."""
+    with _LAST_DEMO_LOCK:
+        stdout = _LAST_DEMO_STDOUT
+    if not stdout:
+        return jsonify({"packets": [], "note": "Chua co du lieu -- chay Run Demo truoc"})
+    pkts = _parse_demo_stdout(stdout)
+    return jsonify({"packets": pkts, "total": len(pkts)})
+
 
 if __name__ == "__main__":
     if os.geteuid() != 0:

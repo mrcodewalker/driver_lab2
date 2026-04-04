@@ -365,7 +365,7 @@ async function doAction(name) {
         if (d.ok) toast(`OK: ${name}`, "#3fb950");
         else toast(`FAIL: ${name} -- ${d.stderr || ""}`, "#f85149");
         await refreshAll();
-        if (name === "demo") { await loadSecEvents(); await loadPacketLog(); }
+        if (name === "demo") { await loadSecEvents(); await loadPacketLog(); await loadRawPackets(); }
     } catch (e) { toast("Network error", "#f85149"); }
     finally { btn.disabled = false; btn.textContent = orig; }
 }
@@ -627,7 +627,7 @@ function closePktModal(e) {
     document.body.style.overflow = "";
 }
 document.addEventListener("keydown", e => {
-    if (e.key === "Escape") { closeModal(); closePktModal(); }
+    if (e.key === "Escape") { closeModal(); closePktModal(); closeRawModal(); }
 });
 
 // ── Ping ──────────────────────────────────────────────────────
@@ -648,6 +648,143 @@ async function doPing() {
         : `FAIL: ${ip} unreachable\n  Loss: ${d.loss}\n\n${d.stdout || d.stderr || ""}`;
 }
 
+// ── Crypto Keys ───────────────────────────────────────────────
+async function loadCryptoKeys() {
+    try {
+        const r = await fetch("/api/crypto_keys");
+        const d = await r.json();
+        // Format hex with spaces every 2 chars
+        const fmt = h => h.match(/.{1,2}/g).join(" ");
+        setEl("k-aes", fmt(d.aes_key) + `  (${d.aes_bits}-bit)`);
+        setEl("k-nonce", fmt(d.aes_nonce));
+        setEl("k-hmac", fmt(d.hmac_key) + `  (${d.hmac_bits}-bit)`);
+        setEl("k-mode", d.mode);
+    } catch (e) { console.error("crypto keys", e); }
+}
+
+// ── Raw Packets ───────────────────────────────────────────────
+let _rawPackets = [];
+
+async function loadRawPackets() {
+    try {
+        const r = await fetch("/api/raw_packets");
+        const d = await r.json();
+        _rawPackets = d.packets || [];
+        renderRawPackets(_rawPackets, d.note);
+    } catch (e) { console.error("raw packets", e); }
+}
+
+function renderRawPackets(pkts, note) {
+    const box = document.getElementById("raw-pkt-list");
+    if (!box) return;
+    if (pkts.length === 0) {
+        box.innerHTML = `<div class="sec-empty">${escHtml(note || "Chua co du lieu -- chay Run Demo")}</div>`;
+        return;
+    }
+    box.innerHTML = pkts.map((p, idx) => {
+        const isTamp = p.tampered;
+        const cls = isTamp ? "tamper" : "ok";
+        const icon = isTamp ? "&#128680;" : "&#128190;";
+        const protoLo = (p.proto || "").toLowerCase();
+        const protoCls = protoLo.includes("tcp") ? "tcp"
+            : protoLo.includes("udp") ? "udp"
+                : protoLo.includes("icmp") ? "icmp" : "other";
+        const protoShort = protoLo.includes("tcp") ? "TCP"
+            : protoLo.includes("dns") ? "DNS"
+                : protoLo.includes("udp") ? "UDP"
+                    : protoLo.includes("icmp") ? "ICMP" : "PKT";
+        const hexPreview = p.full_hex.split(" ").slice(0, 8).join(" ") + (p.full_hex.split(" ").length > 8 ? " ..." : "");
+        return `<div class="pkt-row ${cls}" onclick="openRawModal(${idx})" title="Click xem full hex dump">
+            <div class="pkt-seq">${icon}</div>
+            <div class="pkt-proto ${protoCls}">${protoShort}</div>
+            <div class="pkt-info" style="font-family:var(--font-mono);font-size:10px">${escHtml(hexPreview)}</div>
+            <div class="pkt-bytes">${p.full_hex.split(" ").length}B</div>
+            <div class="pkt-hmac ${cls}">${isTamp ? "TAMP" : "OK"}</div>
+        </div>`;
+    }).join("");
+}
+
+function openRawModal(idx) {
+    const p = _rawPackets[idx]; if (!p) return;
+    const isTamp = p.tampered;
+
+    document.getElementById("raw-modal-title").innerHTML =
+        `&#128190; #${p.seq} ${escHtml(p.proto)} — Raw Hex Dump`;
+
+    // Format hex into rows of 16 bytes with offset + ascii
+    function hexRows(hexStr, label, color) {
+        const bytes = hexStr.split(" ").filter(Boolean);
+        if (!bytes.length) return "";
+        let rows = "";
+        for (let i = 0; i < bytes.length; i += 16) {
+            const chunk = bytes.slice(i, i + 16);
+            const offset = i.toString(16).padStart(4, "0");
+            const hex = chunk.map(b => b.padStart(2, "0")).join(" ").padEnd(47, " ");
+            const ascii = chunk.map(b => {
+                const c = parseInt(b, 16);
+                return c >= 32 && c < 127 ? String.fromCharCode(c) : ".";
+            }).join("");
+            rows += `<div class="hex-row"><span class="hex-off">${offset}</span>  <span style="color:${color}">${escHtml(hex)}</span>  <span class="hex-asc">${escHtml(ascii)}</span></div>`;
+        }
+        return `<div style="margin-bottom:4px;font-size:10px;font-weight:600;color:var(--text-secondary)">${label}</div>${rows}`;
+    }
+
+    const ctRows = hexRows(p.cipher_hex, "Ciphertext (AES-128-CTR encrypted payload):", "#58a6ff");
+    const tagRows = hexRows(p.hmac_tag, "HMAC-SHA256 Tag (8 bytes truncated):", isTamp ? "#f85149" : "#3fb950");
+    const fullRows = hexRows(p.full_hex, "Full payload = ciphertext + HMAC tag:", "#94a3b8");
+
+    document.getElementById("raw-modal-body").innerHTML = `
+        <div class="modal-section">
+            <div class="modal-section-title">Thong tin goi</div>
+            <div class="modal-field info" style="font-size:12px;line-height:2">
+                Protocol : <b style="color:var(--cyan)">${escHtml(p.proto)}</b><br>
+                Plaintext: <b style="color:var(--green)">"${escHtml(p.plain_text || "(ARP/no payload)")}"</b><br>
+                Total    : <b>${p.full_hex.split(" ").filter(Boolean).length} bytes</b>
+                (${p.cipher_hex.split(" ").filter(Boolean).length}B cipher + 8B HMAC tag)<br>
+                Status   : ${isTamp
+            ? '<b style="color:var(--red)">&#128680; TAMPERED — HMAC tag bi sua doi co y</b>'
+            : '<b style="color:var(--green)">&#128272; HMAC OK — goi hop le</b>'}
+            </div>
+        </div>
+        <div class="modal-section">
+            <div class="modal-section-title">Hex dump chi tiet</div>
+            <div class="hex-dump-box">
+                <div class="hex-header">
+                    <span class="hex-off">OFFS</span>
+                    <span style="color:var(--text-muted)">  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f</span>
+                    <span class="hex-asc" style="margin-left:8px">ASCII</span>
+                </div>
+                ${ctRows}
+                <div style="border-top:1px dashed var(--border);margin:6px 0"></div>
+                ${tagRows}
+            </div>
+        </div>
+        <div class="modal-section">
+            <div class="modal-section-title">Full payload (ciphertext + tag)</div>
+            <div class="hex-dump-box">${fullRows}</div>
+        </div>
+        <div class="modal-section">
+            <div class="modal-section-title">Giai thich cau truc</div>
+            <div class="modal-field info" style="font-family:var(--font-sans);font-size:11px;line-height:1.9;color:var(--text-secondary)">
+                <b style="color:var(--blue)">Cau truc goi day du:</b><br>
+                [ ETH (14B) | IP (20B) | L4 header | <span style="color:#58a6ff">AES-128-CTR(payload)</span> | <span style="color:${isTamp ? "#f85149" : "#3fb950"}">HMAC[8]</span> ]<br><br>
+                AES-128-CTR key : <code style="color:var(--cyan)">2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c</code><br>
+                AES nonce       : <code style="color:var(--cyan)">f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 fa fb 00 00 00 01</code><br>
+                HMAC-SHA256 key : <code style="color:var(--purple)">60 3d eb 10 15 ca 71 be 2b 73 ae f0 85 7d 77 81 ...</code><br>
+                HMAC tính trên  : ciphertext (Encrypt-then-MAC model)
+            </div>
+        </div>`;
+
+    document.getElementById("raw-modal").classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+}
+
+function closeRawModal(e) {
+    if (e && e.target !== document.getElementById("raw-modal")) return;
+    document.getElementById("raw-modal").classList.add("hidden");
+    document.body.style.overflow = "";
+}
+
 // ── Init ──────────────────────────────────────────────────────
 window.addEventListener("resize", () => drawChart(_chartData));
 
@@ -660,9 +797,12 @@ async function refreshAll() {
     setInterval(updateClock, 1000);
     drawChart(_chartData);
     await refreshAll();
+    await loadCryptoKeys();
+    await loadRawPackets();
     setInterval(refreshStatus, 3000);
     setInterval(pollLog, 1500);
     setInterval(loadDmesg, 10000);
     setInterval(loadSecEvents, 5000);
     setInterval(loadPacketLog, 6000);
+    setInterval(loadRawPackets, 8000);
 })();

@@ -1305,3 +1305,140 @@ select.inp {
     word-break: break-all;
     margin-top: 4px;
 }
+
+/* ══════════════════════════════════════════════════
+   CRYPTO KEYS CARD
+══════════════════════════════════════════════════ */
+.key-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border-dim);
+}
+
+.key-row:last-of-type {
+    border-bottom: none;
+}
+
+.key-lbl {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: var(--text-secondary);
+}
+
+.key-val {
+    font-size: 10px;
+    color: var(--cyan);
+    word-break: break-all;
+    line-height: 1.6;
+}
+
+/* ══════════════════════════════════════════════════
+   HEX DUMP VIEWER (Raw Packet Modal)
+══════════════════════════════════════════════════ */
+.hex-dump-box {
+    background: var(--bg-base);
+    border: 1px solid var(--border-dim);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    overflow-x: auto;
+    line-height: 1.8;
+}
+
+.hex-header {
+    display: flex;
+    gap: 4px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border-dim);
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+.hex-row {
+    display: flex;
+    gap: 4px;
+    white-space: pre;
+}
+
+.hex-off {
+    color: var(--text-muted);
+    min-width: 36px;
+    flex-shrink: 0;
+}
+
+.hex-asc {
+    color: var(--text-secondary);
+    margin-left: 8px;
+    letter-spacing: .5px;
+}
+
+/* cpng result box */
+.cpng-result {
+    margin-top: 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-dim);
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.cpng-header {
+    padding: 8px 12px;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.cpng-header.ok {
+    background: rgba(16, 185, 129, .1);
+    color: var(--green);
+}
+
+.cpng-header.fail {
+    background: rgba(239, 68, 68, .1);
+    color: var(--red);
+}
+
+.cpng-rows {
+    display: flex;
+    flex-direction: column;
+}
+
+.cpng-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border-dim);
+}
+
+.cpng-row.ok {
+    background: rgba(16, 185, 129, .04);
+}
+
+.cpng-row.fail {
+    background: rgba(239, 68, 68, .04);
+}
+
+.cpng-icon {
+    font-size: 13px;
+}
+
+.cpng-msg {
+    flex: 1;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cpng-ts {
+    color: var(--text-muted);
+    font-size: 10px;
+    white-space: nowrap;
+}

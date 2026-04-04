@@ -56,6 +56,36 @@
                 </div>
             </div>
 
+            <!-- Crypto Keys Card -->
+            <div class="card">
+                <div class="card-title-row">
+                    <span class="card-title">&#128273; Crypto Keys</span>
+                    <button class="btn btn-xs btn-gray" onclick="loadCryptoKeys()">&#8635;</button>
+                </div>
+                <div id="crypto-keys-box">
+                    <div class="key-row">
+                        <div class="key-lbl">AES-128 Key</div>
+                        <div class="key-val mono" id="k-aes">—</div>
+                    </div>
+                    <div class="key-row">
+                        <div class="key-lbl">AES Nonce</div>
+                        <div class="key-val mono" id="k-nonce">—</div>
+                    </div>
+                    <div class="key-row">
+                        <div class="key-lbl">HMAC-256 Key</div>
+                        <div class="key-val mono" id="k-hmac">—</div>
+                    </div>
+                    <div class="key-row" style="border:none">
+                        <div class="key-lbl">Mode</div>
+                        <div class="key-val" id="k-mode" style="color:var(--cyan);font-size:10px">—</div>
+                    </div>
+                    <div
+                        style="margin-top:8px;padding:6px 8px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:5px;font-size:10px;color:var(--text-secondary)">
+                        &#9888; AES_KEY &#8800; HMAC_KEY — hai khoa doc lap (Encrypt-then-MAC)
+                    </div>
+                </div>
+            </div>
+
             <!-- Stats Card -->
             <div class="card">
                 <div class="card-title">Statistics</div>
@@ -219,6 +249,17 @@
                 </div>
             </div>
 
+            <!-- Raw Packet Hex Viewer -->
+            <div class="card">
+                <div class="card-title-row">
+                    <span class="card-title">&#128190; Raw Packet Hex</span>
+                    <button class="btn btn-xs btn-cyan" onclick="loadRawPackets()">&#8635; Refresh</button>
+                </div>
+                <div id="raw-pkt-list" class="pkt-log-table">
+                    <div class="sec-empty">Chua co du lieu -- chay Run Demo</div>
+                </div>
+            </div>
+
         </aside>
     </main>
 
@@ -244,6 +285,17 @@
                 <button class="modal-close" onclick="closePktModal()">&#10005;</button>
             </div>
             <div class="modal-body" id="pkt-modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Raw Packet Detail Modal -->
+    <div id="raw-modal" class="modal-overlay hidden" onclick="closeRawModal(event)">
+        <div class="modal-box" style="max-width:760px">
+            <div class="modal-header">
+                <div class="modal-title" id="raw-modal-title">&#128190; Raw Packet Detail</div>
+                <button class="modal-close" onclick="closeRawModal()">&#10005;</button>
+            </div>
+            <div class="modal-body" id="raw-modal-body"></div>
         </div>
     </div>
 

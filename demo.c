@@ -48,32 +48,37 @@
 #define HMAC_TAG_LEN  8             /* truncated HMAC: 8 bytes append vào cuối payload */
 
 /*
- * AES_KEY: khóa AES-128 chia sẻ giữa demo.c và usb.c (driver).
- * Trong thực tế sẽ được trao đổi qua kênh an toàn.
- * Ở đây hardcode để demo — driver dùng cùng key này để decrypt.
+ * AES_KEY: khóa mã hóa AES-128 (16 byte = 128 bit).
+ * Dùng riêng cho mã hóa payload — KHÔNG dùng chung với HMAC_KEY.
+ * Trong thực tế trao đổi qua kênh an toàn (TLS/key exchange).
+ * Phải khớp với AIC_AES_KEY trong usb.c (kernel driver).
  */
 static const uint8_t AES_KEY[16] = {
-    0xA1, 0xC5, 0xE1, 0x1B, 0x5B, 0x4D, 0x3C, 0x1D,
-    0xE4, 0x0D, 0xE5, 0x16, 0x4E, 0x0A, 0x1F, 0x2B
+    0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
+    0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C
 };
 
 /*
  * AES_NONCE: nonce cố định 16 byte cho CTR mode (demo simplicity).
- * Trong thực tế phải dùng nonce ngẫu nhiên và truyền kèm gói.
+ * Trong thực tế phải dùng nonce ngẫu nhiên mỗi gói và truyền kèm.
+ * Phải khớp với AIC_AES_NONCE trong usb.c.
  */
 static const uint8_t AES_NONCE[16] = {
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-    0x08, 0x09, 0x0A, 0x0B, 0x00, 0x00, 0x00, 0x01
+    0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7,
+    0xF8, 0xF9, 0xFA, 0xFB, 0x00, 0x00, 0x00, 0x01
 };
 
 /*
- * HMAC_KEY: khóa bí mật chia sẻ giữa demo.c và usb.c (driver).
- * Trong thực tế sẽ được trao đổi qua kênh an toàn.
- * Ở đây hardcode để demo — driver dùng cùng key này để verify.
+ * HMAC_KEY: khóa xác thực toàn vẹn HMAC-SHA256 (32 byte = 256 bit).
+ * Hoàn toàn độc lập với AES_KEY — đây là yêu cầu bắt buộc trong
+ * mô hình Encrypt-then-MAC: dùng chung key sẽ làm suy yếu bảo mật.
+ * Phải khớp với AIC_HMAC_KEY trong usb.c (kernel driver).
  */
-static const uint8_t HMAC_KEY[16] = {
-    0xA1, 0xC5, 0xE1, 0x1B, 0x5B, 0x4D, 0x3C, 0x1D,
-    0xE4, 0x0D, 0xE5, 0x16, 0x4E, 0x0A, 0x1F, 0x2B
+static const uint8_t HMAC_KEY[32] = {
+    0x60, 0x3D, 0xEB, 0x10, 0x15, 0xCA, 0x71, 0xBE,
+    0x2B, 0x73, 0xAE, 0xF0, 0x85, 0x7D, 0x77, 0x81,
+    0x1F, 0x35, 0x2C, 0x07, 0x3B, 0x61, 0x08, 0xD7,
+    0x2D, 0x98, 0x10, 0xA3, 0x09, 0x14, 0xDF, 0xF4
 };
 
 /* ================================================================
@@ -636,8 +641,8 @@ int main(int argc, char *argv[])
     for(int i=0;i<16;i++) printf("%02x",AES_KEY[i]);
     printf(" (128-bit)\n");
     printf("  "GRN"[✓]"RST" HMAC key: ");
-    for(int i=0;i<16;i++) printf("%02x",HMAC_KEY[i]);
-    printf(" (16 bytes)\n");
+    for(int i=0;i<32;i++) printf("%02x",HMAC_KEY[i]);
+    printf(" (256-bit)\n");
 
     printf("\n"BOLD"  Bước 3: Gửi packets\n"RST);sep();
 
