@@ -632,3 +632,263 @@ So sánh từng byte với `if (a[i] != b[i]) return false` có thể bị
 Production nên dùng `crypto_memneq()` của kernel.)*
 
 ---
+
+## 8. Mô Hình Encrypt-then-MAC
+
+### 8.1 Ba mô hình kết hợp mã hóa và MAC
+
+| Mô hình | Công thức | Bảo mật |
+|---------|-----------|---------|
+| **MAC-then-Encrypt** | `Enc(M \|\| MAC(M))` | ❌ Yếu — SSL/TLS 3.0 dùng, đã bị tấn công |
+| **Encrypt-then-MAC** | `C = Enc(M); T = MAC(C)` | ✅ Mạnh nhất — dự án này dùng |
+| **Encrypt-and-MAC** | `C = Enc(M); T = MAC(M)` | ⚠ Trung bình — SSH dùng |
+
+### 8.2 Tại sao Encrypt-then-MAC là tốt nhất?
+
+**Lý do 1 — Fail-fast:**
+Driver verify HMAC TRƯỚC khi decrypt. Nếu HMAC sai → từ chối ngay,
+không tốn CPU để decrypt gói rác.
+
+**Lý do 2 — Không lộ thông tin plaintext:**
+MAC tính trên ciphertext → attacker không thể suy ra gì về plaintext
+từ việc MAC pass hay fail.
+
+**Lý do 3 — Chống chosen-ciphertext attack:**
+Attacker không thể tạo ciphertext hợp lệ mà không biết HMAC_KEY.
+
+**Lý do 4 — Hai khóa độc lập:**
+```
+AES_KEY  ≠ HMAC_KEY   (bắt buộc!)
+```
+Dùng chung key cho cả encrypt và MAC có thể tạo ra các tấn công
+cross-protocol. Dự án dùng hai khóa hoàn toàn khác nhau:
+```
+AES_KEY  = 2B 7E 15 16 ... (128-bit, NIST AES test vector)
+HMAC_KEY = 60 3D EB 10 ... (256-bit, hoàn toàn khác)
+```
+
+### 8.3 Luồng Encrypt-then-MAC trong dự án
+
+```
+USERSPACE (demo.c):
+─────────────────────────────────────────────────────
+Plaintext: "AIC-Ping-001-SECRET"
+    │
+    ▼ AES-128-CTR(AES_KEY, NONCE)
+Ciphertext: e3 4f 2a 91 b7 ... (cùng độ dài plaintext)
+    │
+    ▼ HMAC-SHA256(HMAC_KEY, Ciphertext)[0..7]
+Tag: a1 b2 c3 d4 e5 f6 07 18  (8 bytes)
+    │
+    ▼ Ghép lại
+Payload gửi đi: [ Ciphertext | Tag[8] ]
+─────────────────────────────────────────────────────
+
+KERNEL (usb.c):
+─────────────────────────────────────────────────────
+Nhận: [ Ciphertext | Tag[8] ]
+    │
+    ▼ Tách: data = payload[0..len-9], tag = payload[len-8..len-1]
+    │
+    ▼ HMAC-SHA256(HMAC_KEY, data)[0..7] → computed
+    │
+    ├─ computed == tag? → HMAC OK → tx_encrypted++
+    │       └─ AES-128-CTR decrypt → log plaintext preview
+    │
+    └─ computed ≠ tag? → HMAC FAIL → tx_tampered++
+            └─ Log [SECURITY] cảnh báo
+─────────────────────────────────────────────────────
+```
+
+---
+
+## 9. Cấu Trúc Gói Tin Trong Dự Án
+
+### 9.1 Layout đầy đủ
+
+```
+Byte offset:
+┌──────────────────────────────────────────────────────────────────┐
+│ 0        13 │ 14      33 │ 34    hdr │ hdr    N │ N      N+7    │
+├─────────────┼────────────┼───────────┼──────────┼───────────────┤
+│ Ethernet    │ IP header  │ L4 header │Ciphertext│  HMAC tag     │
+│ (14 bytes)  │ (20 bytes) │(8-20 byte)│ (N byte) │  (8 bytes)    │
+│             │            │           │          │               │
+│ dst MAC     │ ver/ihl    │ TCP: 20B  │AES-128   │HMAC-SHA256    │
+│ src MAC     │ TTL=64     │ UDP: 8B   │CTR enc   │truncated      │
+│ EtherType   │ proto      │ ICMP: 8B  │payload   │8 byte đầu     │
+│ 0x0800=IP   │ src/dst IP │           │          │               │
+└─────────────┴────────────┴───────────┴──────────┴───────────────┘
+```
+
+### 9.2 Ví dụ gói ICMP cụ thể
+
+```
+Plaintext payload: "AIC-Ping-001-SECRET" (19 bytes)
+
+Sau encrypt_and_tag():
+  Ciphertext: 19 bytes (AES-128-CTR)
+  HMAC tag:    8 bytes
+  Tổng payload: 27 bytes
+
+Frame hoàn chỉnh:
+  ETH header:  14 bytes
+  IP header:   20 bytes
+  ICMP header:  8 bytes
+  Payload:     27 bytes
+  ─────────────────────
+  Tổng frame:  69 bytes
+```
+
+### 9.3 Gói ARP — không mã hóa
+
+ARP không có application payload → driver đếm vào `tx_plain`:
+
+```
+[ ETH (14B) | ARP header (28B) ]
+Tổng: 42 bytes — không có ciphertext, không có HMAC tag
+```
+
+### 9.4 Gói TAMPERED
+
+```
+Gói bình thường:  [ Ciphertext | a1 b2 c3 d4 e5 f6 07 18 ]
+                                  ↑ byte index 3 = 0xd4
+
+Sau khi flip:     [ Ciphertext | a1 b2 c3 2B e5 f6 07 18 ]
+                                              ↑ 0xd4 XOR 0xFF = 0x2B
+
+Driver tính lại HMAC → computed = a1 b2 c3 d4 e5 f6 07 18
+So sánh với tag  = a1 b2 c3 2B e5 f6 07 18
+→ KHÔNG KHỚP → HMAC FAIL
+```
+
+---
+
+## 10. Web Monitor
+
+### 10.1 Kiến trúc
+
+```
+Browser (index.html + app.js)
+    │ HTTP GET/POST
+    ▼
+Flask server (server.py) — chạy với sudo
+    │
+    ├─ /api/status      → lsusb + ip link + /proc/aicsemi_usbnet/monitor
+    ├─ /api/security    → parse dmesg | grep aicsemi
+    ├─ /api/raw_packets → parse dmesg (2-pass) → hmac_ok/tampered per packet
+    ├─ /api/crypto_keys → trả về AES_KEY, HMAC_KEY, NONCE
+    ├─ /api/action/demo → chạy ./demo, lưu stdout
+    └─ /api/action/compile → chạy compile.bash
+```
+
+### 10.2 Parse dmesg 2-pass
+
+Vấn đề: Driver log HMAC OK/FAIL **trước** khi log `[TX #N]`:
+
+```
+dmesg thực tế:
+[123.456] [aicsemi] ✓ [CRYPTO] TX #5 HMAC OK — payload=87B   ← HMAC line
+[123.457] [aicsemi]   [TX #5  ] IPv4 / ICMP bytes=101 ...    ← TX line
+```
+
+Giải pháp 2-pass:
+- **Pass 1:** Quét tất cả `[TX #N]` lines → build `pkt_map[seq]`
+- **Pass 2:** Quét lại, gán `hmac_ok/tampered` theo `TX #N` trong HMAC lines
+
+### 10.3 Hiển thị hex dump với highlight
+
+Khi click vào gói trong Raw Packet Hex panel:
+- Byte ciphertext: màu **cyan**
+- HMAC tag (8 byte cuối): màu **xanh lá** nếu OK
+- HMAC tag: màu **đỏ phát sáng** (`text-shadow: 0 0 8px red`) nếu TAMPERED
+
+---
+
+## 11. Câu Hỏi Bảo Vệ Thường Gặp
+
+**Q: Tại sao dùng AES-128 mà không phải AES-256?**
+A: AES-128 đã đủ an toàn cho mục đích demo. Không có tấn công thực tế nào
+phá được AES-128. AES-256 chỉ cần thiết khi lo ngại về quantum computing
+(Grover's algorithm giảm security xuống 64-bit với AES-128).
+
+**Q: CTR mode có cần padding không?**
+A: Không. Đây là ưu điểm lớn của CTR — keystream được tạo theo từng byte,
+không cần padding như CBC hay ECB mode.
+
+**Q: Nonce cố định có an toàn không?**
+A: Trong thực tế KHÔNG an toàn. Nếu dùng cùng (Key, Nonce) cho 2 gói khác nhau,
+attacker có thể XOR 2 ciphertext để loại bỏ keystream và suy ra quan hệ giữa
+2 plaintext. Dự án dùng nonce cố định chỉ để đơn giản hóa demo.
+Thực tế phải dùng nonce ngẫu nhiên 12 byte + counter 4 byte (theo RFC 3686).
+
+**Q: Tại sao HMAC_KEY phải khác AES_KEY?**
+A: Nếu dùng chung key, có thể xảy ra tấn công cross-protocol:
+attacker dùng oracle của AES để tấn công HMAC hoặc ngược lại.
+Nguyên tắc: mỗi primitive mật mã phải có khóa riêng độc lập.
+
+**Q: Driver có drop gói bị tamper không?**
+A: Không. Driver chỉ log cảnh báo và tăng counter `tx_tampered`.
+Gói vẫn được xử lý bình thường. Trong hệ thống thực tế nên drop gói
+và có thể blacklist source MAC/IP.
+
+**Q: Ring buffer 1024 entries có đủ không?**
+A: Với tốc độ demo (~1 gói/300ms), 1024 entries đủ cho ~5 phút.
+Khi đầy, entry cũ bị ghi đè (circular buffer). Có thể tăng
+`MON_RING_SIZE` nhưng phải là lũy thừa của 2.
+
+**Q: Tại sao dùng AF_PACKET thay vì socket thông thường?**
+A: AF_PACKET cho phép gửi raw frame layer 2, bỏ qua hoàn toàn
+TCP/IP stack. Điều này cần thiết để demo có thể tự xây dựng
+Ethernet/IP/TCP header và đặt payload đã mã hóa vào đúng vị trí.
+Cần quyền root (sudo) để mở AF_PACKET socket.
+
+**Q: Modeswitch hoạt động như thế nào?**
+A: Thiết bị AIC Semi dùng cơ chế "ZeroCD" — khi cắm vào, xuất hiện
+như USB Mass Storage (PID 0x5721) chứa driver Windows. Driver Linux
+gửi lệnh SCSI EJECT (CBW với command 0x1b) qua Bulk OUT endpoint.
+Firmware nhận lệnh → tự disconnect → re-enumerate với PID WiFi (0x8d80).
+
+**Q: Kernel Crypto API khác gì với tự implement?**
+A: Kernel Crypto API (`crypto/hash.h`, `crypto/skcipher.h`) dùng
+implementation được tối ưu hóa (có thể dùng AES-NI hardware instruction
+nếu CPU hỗ trợ), đã được kiểm tra bảo mật, và tích hợp với kernel
+key management. Tự implement (như trong demo.c) chỉ phù hợp cho
+userspace demo, không nên dùng trong production kernel code.
+
+---
+
+## Tóm Tắt Nhanh Cho Bảo Vệ
+
+```
+Dự án làm gì?
+→ Viết Linux kernel module cho USB WiFi AIC Semi
+→ Tích hợp AES-128-CTR (mã hóa) + HMAC-SHA256 (xác thực toàn vẹn)
+→ Demo gửi gói tin mã hóa, driver verify và phát hiện tamper
+
+AES-128-CTR là gì?
+→ Block cipher AES (16 byte block, 10 rounds, 128-bit key)
+→ CTR mode: mã hóa counter block → keystream → XOR với plaintext
+→ Ưu điểm: không cần padding, song song hóa được, symmetric
+
+HMAC-SHA256 là gì?
+→ MAC = SHA256((K⊕opad) || SHA256((K⊕ipad) || ciphertext))
+→ Dùng 8 byte đầu làm tag → 64-bit security
+→ Verify: tính lại HMAC, so sánh với tag cuối payload
+
+Encrypt-then-MAC là gì?
+→ Mã hóa trước, tính MAC trên ciphertext
+→ Mạnh nhất trong 3 mô hình kết hợp
+→ Fail-fast: verify HMAC trước khi decrypt
+
+Hai khóa độc lập:
+→ AES_KEY  (128-bit): chỉ dùng cho mã hóa
+→ HMAC_KEY (256-bit): chỉ dùng cho xác thực
+→ Không bao giờ dùng chung key cho 2 mục đích khác nhau
+```
+
+---
+
+*Tài liệu này được tạo tự động từ source code của dự án.*
+*Phiên bản driver: 4.0.0 | Demo: v5.0 | Web Monitor: v5.0*
